@@ -23,7 +23,7 @@ async fn health_returns_ok_json() {
     assert_eq!(health.app, "ABHIVERSE");
     assert_eq!(health.service, "abhiverse-api");
     assert_eq!(health.status, "ok");
-    assert_eq!(health.version, "0.1.0");
+    assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(health.protocol_version, 1);
 }
 
