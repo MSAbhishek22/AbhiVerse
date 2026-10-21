@@ -77,3 +77,21 @@ receivers verify again locally after assembly.
 
 Chunks live under `ABHIVERSE_TRANSFER_DIR` (default: a per-process
 temp directory) as one `.part` file per transfer.
+
+
+## Remote desktop signalling (Task 006a)
+
+Full design in `docs/remote-desktop.md`. Summary:
+
+- `GET /config/rtc` → `RtcConfig` (STUN default; TURN via
+  `ABHIVERSE_ICE_SERVERS_JSON`).
+- `POST /sessions {device_id, controller_id, sdp_offer}` → `201`
+  (paired controller only; offers expire after 120 s).
+- `GET /sessions/{id}?as={participant}` / `GET /sessions?for={device_id}`.
+- `POST /sessions/{id}/answer {sdp_answer}` — agent-signed over
+  `abhiverse-session-answer:{id}:{sha256(answer)}:{ts}`; `/reject`
+  and agent `/end` are signed the same way.
+- `POST|GET /sessions/{id}/ice` — trickle ICE with sequence numbers.
+- `POST /sessions/{id}/end {from_id}`.
+- Input events travel on the WebRTC data channel `abhiverse-input`
+  as tagged JSON (`InputEvent`), never through the API.
