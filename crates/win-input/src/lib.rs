@@ -10,6 +10,7 @@
 //! event never implies permission to inject it.
 
 pub mod capture;
+pub mod indicator;
 
 use abhiverse_protocol::InputEvent;
 
