@@ -7,22 +7,26 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.4 — Tasks 001–006a.** Local foundation, device
-> identity (Ed25519 keys), pairing with signed approval, presence
-> heartbeats, revocation, chunked file transfer with SHA-256
-> integrity and resume, plus remote-desktop *signalling*: WebRTC
-> session brokering with on-device approval and signed answers.
-> Screen capture/video is *not* implemented yet — see
-> `docs/remote-desktop.md` for the design and slice plan.
+> **Status: v0.5 — Tasks 001–006 + controller keys & persistence.**
+> Device identity (Ed25519) for agents *and* controllers, pairing
+> with signed approval (code or QR), presence, revocation signed by
+> either side, chunked file transfer with SHA-256 integrity and
+> resume, persistent API state, and remote desktop: WebRTC
+> signalling with signed requests/answers, H.264 screen streaming
+> (DXGI capture on Windows), `SendInput` injection behind an
+> explicit agent flag, and a Flutter viewer with touch/keyboard
+> input. Media/input verification on real hardware is the remaining
+> step — the dev sandbox blocks UDP; see `docs/remote-desktop.md`.
 
 ## What exists today
 
 | Component | Path | State |
 |---|---|---|
-| Coordination API (Rust + Axum) | `server/api` | Health, pairing, presence, revocation, file-transfer and remote-desktop signalling endpoints; binds to localhost; in-memory state, chunk store on disk |
-| Windows agent (Rust) | `agents/windows` | Device identity, `--pair` flow with on-device approval, signed heartbeats, `--send-file` / `--receive`, `--remote` WebRTC session answering (approval prompt, input-channel logging), `--revoke`. No screen capture or input injection yet |
-| Android controller (Flutter) | `apps/controller` | Connection status, paired-device list with online presence, pairing by 6-digit code, send files to a device, download & verify incoming files, remote-session signalling client (viewer UI lands in 006b) |
-| Shared protocol types | `crates/protocol` | Health, device, pairing and presence payloads, protocol v1 |
+| Coordination API (Rust + Axum) | `server/api` | Health, pairing, presence, revocation, file-transfer and remote-desktop signalling endpoints; binds to localhost; optional persistent state via `ABHIVERSE_STATE_FILE`, chunk store on disk; verifies agent *and* controller signatures |
+| Windows agent (Rust) | `agents/windows` | Device identity, `--pair` flow with QR code + on-device approval, signed heartbeats, `--send-file` / `--receive`, `--remote` WebRTC sessions (approval prompt, H.264 screen stream via DXGI, session banner), `--allow-input` to enable `SendInput` injection, `--revoke` |
+| Android controller (Flutter) | `apps/controller` | Own Ed25519 identity in secure storage (signs transfers, session requests, revocations), device list with presence, pairing by code or QR scan, send/download & verify files, remote-desktop viewer with touch + keyboard input, revoke pairing |
+| Shared protocol types | `crates/protocol` | Health, device, pairing, presence, transfer, session and input payloads + canonical signing messages, protocol v1 |
+| Remote input & capture (Rust) | `crates/win-input` | `InputEvent` → platform actions mapping, Windows `SendInput` injection, DXGI desktop duplication capture, BGRA→I420 conversion (Windows code type-checked in CI on the Windows target) |
 | Device identity (Rust) | `crates/identity` | Ed25519 key generation/storage (0600), fingerprint device IDs, sign/verify |
 | File transfer (Rust) | `crates/file-transfer` | 256 KiB chunk plans, SHA-256 integrity, resumable assembly, safe file names |
 
