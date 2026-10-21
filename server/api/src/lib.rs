@@ -18,11 +18,14 @@ use std::sync::{Arc, Mutex};
 
 use abhiverse_identity::{fingerprint, hex_decode, hex_encode, verify};
 use abhiverse_protocol::{
-    chunk_download_message, chunk_upload_message, now_unix, transfer_complete_message,
-    transfer_create_message, ClaimPairingRequest, CreatePairingRequest, CreatePairingResponse,
-    CreateTransferRequest, DeviceInfo, DeviceListResponse, DeviceView, HealthResponse,
-    HeartbeatRequest, PairingDecisionRequest, PairingStatus, PairingView, RevokeRequest,
-    TransferListResponse, TransferStatus, TransferView, API_SERVICE_NAME,
+    chunk_download_message, chunk_upload_message, now_unix, session_answer_message,
+    session_end_message, session_reject_message, transfer_complete_message,
+    transfer_create_message, AnswerSessionRequest, ClaimPairingRequest, CreatePairingRequest,
+    CreatePairingResponse, CreateSessionRequest, CreateTransferRequest, DeviceInfo,
+    DeviceListResponse, DeviceView, EndSessionRequest, HealthResponse, HeartbeatRequest,
+    IceCandidateListResponse, IceCandidateRequest, IceCandidateView, PairingDecisionRequest,
+    PairingStatus, PairingView, RevokeRequest, RtcConfig, SessionListResponse, SessionStatus,
+    SessionView, TransferListResponse, TransferStatus, TransferView, API_SERVICE_NAME,
 };
 use axum::{
     body::Bytes,
@@ -76,6 +79,20 @@ struct Store {
     sessions: HashMap<String, Session>,
     devices: HashMap<String, TrustedDevice>,
     transfers: HashMap<String, TransferRec>,
+    rd_sessions: HashMap<String, RdSession>,
+}
+
+#[derive(Clone)]
+struct RdSession {
+    device_id: String,
+    controller_id: String,
+    status: SessionStatus,
+    sdp_offer: String,
+    sdp_answer: Option<String>,
+    created_at: i64,
+    expires_at: i64,
+    ice: Vec<IceCandidateView>,
+    next_seq: u64,
 }
 
 struct AppState {
@@ -116,6 +133,13 @@ pub fn build_app() -> Router {
             put(upload_chunk).get(download_chunk),
         )
         .route("/transfers/{id}/complete", post(complete_transfer))
+        .route("/config/rtc", get(rtc_config))
+        .route("/sessions", post(create_session).get(list_sessions))
+        .route("/sessions/{id}", get(get_session))
+        .route("/sessions/{id}/answer", post(answer_session))
+        .route("/sessions/{id}/reject", post(reject_session))
+        .route("/sessions/{id}/ice", post(post_ice).get(get_ice))
+        .route("/sessions/{id}/end", post(end_session))
         .with_state(store)
 }
 
@@ -693,4 +717,295 @@ async fn complete_transfer(
             "assembled file hash does not match declared sha256",
         )
     }
+}
+
+// ---------- Task 006: remote desktop signalling ----------
+
+const SESSION_TTL_SECS: i64 = 120;
+
+async fn rtc_config() -> Json<RtcConfig> {
+    if let Ok(raw) = std::env::var("ABHIVERSE_ICE_SERVERS_JSON") {
+        if let Ok(servers) = serde_json::from_str::<Vec<abhiverse_protocol::IceServerConfig>>(&raw)
+        {
+            return Json(RtcConfig {
+                ice_servers: servers,
+            });
+        }
+    }
+    Json(RtcConfig::default_stun())
+}
+
+fn rd_view(id: &str, rec: &RdSession) -> SessionView {
+    SessionView {
+        session_id: id.to_string(),
+        device_id: rec.device_id.clone(),
+        controller_id: rec.controller_id.clone(),
+        status: rec.status,
+        sdp_offer: rec.sdp_offer.clone(),
+        sdp_answer: rec.sdp_answer.clone(),
+        created_at: rec.created_at,
+        expires_at: rec.expires_at,
+    }
+}
+
+fn refresh_rd_expiry(rec: &mut RdSession) {
+    if rec.status == SessionStatus::Offered && now_unix() > rec.expires_at {
+        rec.status = SessionStatus::Expired;
+    }
+}
+
+async fn create_session(
+    State(state): State<Shared>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Response {
+    if req.sdp_offer.is_empty() || req.sdp_offer.len() > 100_000 {
+        return err(StatusCode::BAD_REQUEST, "sdp_offer missing or too large");
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let allowed = store.devices.get(&req.device_id).is_some_and(|d| {
+            !d.revoked && d.controller_id == req.controller_id && !req.controller_id.is_empty()
+        });
+        if !allowed {
+            return err(
+                StatusCode::FORBIDDEN,
+                "only the paired controller can request a session",
+            );
+        }
+    }
+    let mut rng = rand::thread_rng();
+    let id_bytes: [u8; 16] = rng.gen();
+    let session_id = hex_encode(&id_bytes);
+    let now = now_unix();
+    let rec = RdSession {
+        device_id: req.device_id,
+        controller_id: req.controller_id,
+        status: SessionStatus::Offered,
+        sdp_offer: req.sdp_offer,
+        sdp_answer: None,
+        created_at: now,
+        expires_at: now + SESSION_TTL_SECS,
+        ice: Vec::new(),
+        next_seq: 1,
+    };
+    let view = rd_view(&session_id, &rec);
+    state
+        .store
+        .lock()
+        .unwrap()
+        .rd_sessions
+        .insert(session_id, rec);
+    (StatusCode::CREATED, Json(view)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct ParticipantQuery {
+    #[serde(rename = "as")]
+    participant: Option<String>,
+    after: Option<u64>,
+    #[serde(rename = "for")]
+    recipient: Option<String>,
+}
+
+async fn list_sessions(
+    State(state): State<Shared>,
+    Query(q): Query<ParticipantQuery>,
+) -> Json<SessionListResponse> {
+    let mut store = state.store.lock().unwrap();
+    let sessions = store
+        .rd_sessions
+        .iter_mut()
+        .filter(|(_, rec)| q.recipient.as_deref().is_none_or(|r| r == rec.device_id))
+        .map(|(id, rec)| {
+            refresh_rd_expiry(rec);
+            rd_view(id, rec)
+        })
+        .collect();
+    Json(SessionListResponse { sessions })
+}
+
+async fn get_session(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<ParticipantQuery>,
+) -> Response {
+    let mut store = state.store.lock().unwrap();
+    let Some(rec) = store.rd_sessions.get_mut(&id) else {
+        return err(StatusCode::NOT_FOUND, "unknown session");
+    };
+    refresh_rd_expiry(rec);
+    let participant = q.participant.as_deref().unwrap_or("");
+    if participant != rec.device_id && participant != rec.controller_id {
+        return err(StatusCode::FORBIDDEN, "not a participant of this session");
+    }
+    Json(rd_view(&id, rec)).into_response()
+}
+
+async fn answer_session(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<AnswerSessionRequest>,
+) -> Response {
+    let device_pk = {
+        let mut store = state.store.lock().unwrap();
+        let Some(rec) = store.rd_sessions.get_mut(&id) else {
+            return err(StatusCode::NOT_FOUND, "unknown session");
+        };
+        refresh_rd_expiry(rec);
+        let device_id = rec.device_id.clone();
+        let pk = store
+            .devices
+            .get(&device_id)
+            .map(|d| d.info.public_key.clone());
+        pk
+    };
+    let Some(pk) = device_pk else {
+        return err(StatusCode::NOT_FOUND, "session device no longer exists");
+    };
+    let ts = header(&headers, "x-abhiverse-timestamp")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let answer_hash = abhiverse_file_transfer::sha256_hex(req.sdp_answer.as_bytes());
+    let message = session_answer_message(&id, &answer_hash, ts);
+    if let Some(resp) = signature_error(&headers, &pk, &message) {
+        return resp;
+    }
+    let mut store = state.store.lock().unwrap();
+    let rec = store.rd_sessions.get_mut(&id).unwrap();
+    match rec.status {
+        SessionStatus::Expired => return err(StatusCode::GONE, "session offer expired"),
+        SessionStatus::Offered => {}
+        _ => return err(StatusCode::CONFLICT, "session is not waiting for an answer"),
+    }
+    rec.sdp_answer = Some(req.sdp_answer);
+    rec.status = SessionStatus::Answered;
+    Json(rd_view(&id, rec)).into_response()
+}
+
+async fn reject_session(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let device_pk = {
+        let store = state.store.lock().unwrap();
+        let Some(rec) = store.rd_sessions.get(&id) else {
+            return err(StatusCode::NOT_FOUND, "unknown session");
+        };
+        store
+            .devices
+            .get(&rec.device_id)
+            .map(|d| d.info.public_key.clone())
+    };
+    let Some(pk) = device_pk else {
+        return err(StatusCode::NOT_FOUND, "session device no longer exists");
+    };
+    let ts = header(&headers, "x-abhiverse-timestamp")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let message = session_reject_message(&id, ts);
+    if let Some(resp) = signature_error(&headers, &pk, &message) {
+        return resp;
+    }
+    let mut store = state.store.lock().unwrap();
+    let rec = store.rd_sessions.get_mut(&id).unwrap();
+    refresh_rd_expiry(rec);
+    if rec.status != SessionStatus::Offered {
+        return err(StatusCode::CONFLICT, "session is not waiting for an answer");
+    }
+    rec.status = SessionStatus::Rejected;
+    Json(rd_view(&id, rec)).into_response()
+}
+
+async fn post_ice(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(req): Json<IceCandidateRequest>,
+) -> Response {
+    let mut store = state.store.lock().unwrap();
+    let Some(rec) = store.rd_sessions.get_mut(&id) else {
+        return err(StatusCode::NOT_FOUND, "unknown session");
+    };
+    refresh_rd_expiry(rec);
+    if req.from_id != rec.device_id && req.from_id != rec.controller_id {
+        return err(StatusCode::FORBIDDEN, "not a participant of this session");
+    }
+    if matches!(
+        rec.status,
+        SessionStatus::Ended | SessionStatus::Rejected | SessionStatus::Expired
+    ) {
+        return err(StatusCode::CONFLICT, "session is closed");
+    }
+    let seq = rec.next_seq;
+    rec.next_seq += 1;
+    rec.ice.push(IceCandidateView {
+        seq,
+        from_id: req.from_id,
+        candidate: req.candidate,
+        sdp_mid: req.sdp_mid,
+        sdp_mline_index: req.sdp_mline_index,
+    });
+    Json(serde_json::json!({ "seq": seq })).into_response()
+}
+
+async fn get_ice(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<ParticipantQuery>,
+) -> Response {
+    let store = state.store.lock().unwrap();
+    let Some(rec) = store.rd_sessions.get(&id) else {
+        return err(StatusCode::NOT_FOUND, "unknown session");
+    };
+    let participant = q.participant.as_deref().unwrap_or("");
+    if participant != rec.device_id && participant != rec.controller_id {
+        return err(StatusCode::FORBIDDEN, "not a participant of this session");
+    }
+    let after = q.after.unwrap_or(0);
+    let candidates = rec
+        .ice
+        .iter()
+        .filter(|c| c.from_id != participant && c.seq > after)
+        .cloned()
+        .collect();
+    Json(IceCandidateListResponse { candidates }).into_response()
+}
+
+async fn end_session(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<EndSessionRequest>,
+) -> Response {
+    let (device_id, controller_id, device_pk) = {
+        let store = state.store.lock().unwrap();
+        let Some(rec) = store.rd_sessions.get(&id) else {
+            return err(StatusCode::NOT_FOUND, "unknown session");
+        };
+        let pk = store
+            .devices
+            .get(&rec.device_id)
+            .map(|d| d.info.public_key.clone());
+        (rec.device_id.clone(), rec.controller_id.clone(), pk)
+    };
+    if req.from_id != device_id && req.from_id != controller_id {
+        return err(StatusCode::FORBIDDEN, "not a participant of this session");
+    }
+    if req.from_id == device_id {
+        let Some(pk) = device_pk else {
+            return err(StatusCode::NOT_FOUND, "session device no longer exists");
+        };
+        let ts = header(&headers, "x-abhiverse-timestamp")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let message = session_end_message(&id, ts);
+        if let Some(resp) = signature_error(&headers, &pk, &message) {
+            return resp;
+        }
+    }
+    let mut store = state.store.lock().unwrap();
+    let rec = store.rd_sessions.get_mut(&id).unwrap();
+    rec.status = SessionStatus::Ended;
+    Json(rd_view(&id, rec)).into_response()
 }
