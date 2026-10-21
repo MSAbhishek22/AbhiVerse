@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abhiverse-agent-windows"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "abhiverse-file-transfer",
  "abhiverse-identity",
@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "abhiverse-api"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "abhiverse-file-transfer",
  "abhiverse-identity",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "abhiverse-file-transfer"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "abhiverse-identity",
  "serde",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "abhiverse-identity"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "abhiverse-protocol",
  "ed25519-dalek",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "abhiverse-protocol"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "abhiverse-win-input"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "abhiverse-protocol",
  "windows",
