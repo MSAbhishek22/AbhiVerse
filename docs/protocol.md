@@ -28,8 +28,13 @@ Ed25519 public key (hex). The API rejects registrations whose
 
 - `POST /pairing/requests` `{agent: DeviceInfo}` → `201 {pairing_id, code, expires_at}`.
   Codes are 6 digits, live 5 minutes, single-use.
-- `POST /pairing/claim` `{code, controller_id, controller_name}` → `200 PairingView`
-  (`404` unknown/expired code, `409` code already used).
+- `POST /pairing/claim` `{code, controller: DeviceInfo}` → `200 PairingView`
+  (`404` unknown/expired code, `409` code already used, `400` if the
+  controller's `device_id` is not the fingerprint of its public key).
+  Since v0.5 the controller registers its Ed25519 identity here; the
+  API stores the key and verifies this controller's signatures from
+  then on. The agent also prints the code as a QR
+  (`abhiverse://pair?code=…`) for the app's scanner.
 - `GET /pairing/{pairing_id}` → `PairingView`.
 - `POST /pairing/{pairing_id}/approve` `{signature}` — hex Ed25519
   signature by the agent over `abhiverse-pairing-approve:{pairing_id}:{code}`.
@@ -85,7 +90,12 @@ Full design in `docs/remote-desktop.md`. Summary:
 
 - `GET /config/rtc` → `RtcConfig` (STUN default; TURN via
   `ABHIVERSE_ICE_SERVERS_JSON`).
-- `POST /sessions {device_id, controller_id, sdp_offer}` → `201`
+- `POST /sessions {device_id, controller_id, sdp_offer}` → `201`.
+  Since v0.5 the controller must sign the request
+  (`abhiverse-session-create:{device_id}:{controller_id}:{sha256(offer)}:{ts}`),
+  and transfer creates (`abhiverse-transfer-create:…`) and
+  revocations (`abhiverse-revoke:…`) are likewise accepted from
+  either the device's key or its paired controller's key.
   (paired controller only; offers expire after 120 s).
 - `GET /sessions/{id}?as={participant}` / `GET /sessions?for={device_id}`.
 - `POST /sessions/{id}/answer {sdp_answer}` — agent-signed over
