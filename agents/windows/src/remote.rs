@@ -27,13 +27,19 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::track::track_local::TrackLocal;
 
-pub fn run(identity: DeviceIdentity) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn run(
+    identity: DeviceIdentity,
+    allow_input: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(run_async(identity))
+    runtime.block_on(run_async(identity, allow_input))
 }
 
 struct Signalling {
@@ -59,6 +65,7 @@ impl Signalling {
 
 async fn run_async(
     identity: DeviceIdentity,
+    allow_input: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = abhiverse_identity::default_data_dir();
     let Some(record) = abhiverse_agent_windows::load_pairing(&data_dir) else {
@@ -73,6 +80,11 @@ async fn run_async(
         "Remote desktop listener running for '{}' ({}). Waiting for session requests…",
         identity.info.name, device_id
     );
+    if allow_input {
+        println!("Input injection is ENABLED (--allow-input): an approved controller can move the mouse and type on this desktop.");
+    } else {
+        println!("Input injection is disabled: incoming input events will be logged only. Restart with --remote --allow-input to enable control.");
+    }
 
     let rtc: RtcConfig = sig.get_json("/config/rtc").await?;
     let config = rtc_configuration(&rtc);
@@ -129,8 +141,15 @@ async fn run_async(
                 let api_clone = webrtc_api.clone();
                 let config_clone = config.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_session(sig_client, id_clone, api_clone, config_clone, session).await
+                    if let Err(e) = handle_session(
+                        sig_client,
+                        id_clone,
+                        api_clone,
+                        config_clone,
+                        session,
+                        allow_input,
+                    )
+                    .await
                     {
                         eprintln!("session failed: {e}");
                     }
@@ -176,6 +195,7 @@ async fn handle_session(
     webrtc_api: Arc<webrtc::api::API>,
     config: RTCConfiguration,
     session: SessionView,
+    allow_input: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let device_id = identity.info.device_id.clone();
     let session_id = session.session_id.clone();
@@ -247,7 +267,20 @@ async fn handle_session(
                     if msg.is_string {
                         let text = String::from_utf8_lossy(&msg.data);
                         match serde_json::from_str::<InputEvent>(&text) {
-                            Ok(event) => println!("INPUT EVENT: {event:?}"),
+                            Ok(event) => {
+                                if allow_input {
+                                    let actions = abhiverse_win_input::event_to_actions(
+                                        &event,
+                                        abhiverse_win_input::screen_size(),
+                                    );
+                                    match abhiverse_win_input::apply(&actions) {
+                                        Ok(()) => println!("INPUT APPLIED: {event:?}"),
+                                        Err(e) => println!("INPUT FAILED ({e}): {event:?}"),
+                                    }
+                                } else {
+                                    println!("INPUT EVENT (injection disabled): {event:?}");
+                                }
+                            }
                             Err(_) => println!("INPUT (raw): {text}"),
                         }
                     }
@@ -255,6 +288,53 @@ async fn handle_session(
             }));
         })
     }));
+
+    // Video (006b): if the offer asks for video, attach an H.264
+    // sample track fed by desktop capture (Windows/DXGI) with a
+    // test-pattern fallback, encoded with OpenH264.
+    // The OpenH264 encoder is not Send, so video runs on a
+    // dedicated thread with a stop flag.
+    let video_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if session.sdp_offer.contains("m=video") {
+        let track = Arc::new(TrackLocalStaticSample::new(
+            webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability {
+                mime_type: webrtc::api::media_engine::MIME_TYPE_H264.to_owned(),
+                clock_rate: 90000,
+                channels: 0,
+                sdp_fmtp_line:
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                        .to_owned(),
+                rtcp_feedback: vec![],
+            },
+            "video".to_owned(),
+            "abhiverse-screen".to_owned(),
+        ));
+        match pc
+            .add_track(Arc::clone(&track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+        {
+            Ok(_) => {
+                println!("Video track attached (H.264).");
+                let stop = Arc::clone(&video_stop);
+                std::thread::spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            eprintln!("video: could not start runtime: {e}");
+                            return;
+                        }
+                    };
+                    rt.block_on(video_loop(track, stop));
+                });
+            }
+            Err(e) => {
+                println!("Could not attach video track ({e}); continuing without video.");
+            }
+        }
+    }
 
     // Offer -> answer, posted with the device signature.
     pc.set_remote_description(RTCSessionDescription::offer(session.sdp_offer.clone())?)
@@ -279,6 +359,13 @@ async fn handle_session(
         .await?
         .error_for_status()?;
     println!("Session {session_id} answered; waiting for the peer to connect…");
+    println!("============================================================");
+    println!(
+        "  REMOTE SESSION ACTIVE — '{}' is connected to this computer.",
+        session.controller_id
+    );
+    println!("  Keep this window open; closing it ends remote access.");
+    println!("============================================================");
 
     // Remote ICE polling + remote end detection.
     let last_seq = Arc::new(AtomicU64::new(0));
@@ -317,7 +404,198 @@ async fn handle_session(
             }
         }
     }
+    video_stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = pc.close().await;
-    println!("Session {session_id} closed.");
+    println!("============================================================");
+    println!("  REMOTE SESSION ENDED ({session_id}).");
+    println!("============================================================");
     Ok(())
+}
+
+/// Split an Annex-B byte stream into NAL units (payload only,
+/// start codes stripped).
+fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
+    let mut units = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        let is_start = data[i] == 0
+            && data[i + 1] == 0
+            && (data[i + 2] == 1 || (i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1));
+        if is_start {
+            let code_len = if data[i + 2] == 1 { 3 } else { 4 };
+            if let Some(s) = start {
+                if s < i {
+                    units.push(&data[s..i]);
+                }
+            }
+            start = Some(i + code_len);
+            i += code_len;
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(s) = start {
+        if s < data.len() {
+            units.push(&data[s..]);
+        }
+    }
+    units.into_iter().filter(|u| !u.is_empty()).collect()
+}
+
+/// Encode and send screen frames until aborted.
+///
+/// Source priority: DXGI desktop duplication on Windows; the
+/// synthetic test pattern everywhere else (and as a fallback).
+/// The first real-hardware run happens on the user's machine —
+/// see docs/remote-desktop.md.
+async fn video_loop(track: Arc<TrackLocalStaticSample>, stop: Arc<std::sync::atomic::AtomicBool>) {
+    use abhiverse_win_input::capture::{bgra_to_i420, test_pattern_frame, BgraFrame};
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 360;
+    const FRAME_MS: u64 = 100; // 10 fps
+    let config = openh264::encoder::EncoderConfig::new()
+        .set_bitrate_bps(1_200_000)
+        .max_frame_rate(10.0);
+    let mut encoder = match openh264::encoder::Encoder::with_api_config(
+        openh264::OpenH264API::from_source(),
+        config,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("video: OpenH264 encoder failed to start: {e}");
+            return;
+        }
+    };
+    #[cfg(windows)]
+    let mut capturer = abhiverse_win_input::capture::DxgiCapturer::new().ok();
+    #[cfg(windows)]
+    if capturer.is_some() {
+        println!("video: streaming desktop via DXGI duplication");
+    } else {
+        println!("video: DXGI unavailable — streaming test pattern");
+    }
+    let mut tick: u64 = 0;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(FRAME_MS));
+    loop {
+        ticker.tick().await;
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        tick += 1;
+        let frame: BgraFrame = {
+            #[cfg(windows)]
+            {
+                match capturer.as_mut().map(|c| c.capture(0)) {
+                    Some(Ok(Some(f))) => downscale_640x360(f),
+                    _ => test_pattern_frame(WIDTH, HEIGHT, tick),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                test_pattern_frame(WIDTH, HEIGHT, tick)
+            }
+        };
+        let i420 = bgra_to_i420(&frame);
+        let yuv = openh264::formats::YUVBuffer::from_vec(i420, WIDTH as usize, HEIGHT as usize);
+        let bitstream = match encoder.encode(&yuv) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("video: encode failed: {e}");
+                continue;
+            }
+        };
+        let au = bitstream.to_vec();
+        if au.is_empty() {
+            continue;
+        }
+        let units = split_annexb(&au);
+        let count = units.len();
+        for (i, nal) in units.into_iter().enumerate() {
+            let sample = Sample {
+                data: bytes::Bytes::copy_from_slice(nal),
+                duration: if i + 1 == count {
+                    std::time::Duration::from_millis(FRAME_MS)
+                } else {
+                    std::time::Duration::ZERO
+                },
+                ..Default::default()
+            };
+            if track.write_sample(&sample).await.is_err() {
+                return; // peer went away
+            }
+        }
+    }
+}
+
+/// Nearest-neighbour downscale to the streaming size (capture
+/// frames arrive at native resolution).
+#[cfg(windows)]
+fn downscale_640x360(
+    frame: abhiverse_win_input::capture::BgraFrame,
+) -> abhiverse_win_input::capture::BgraFrame {
+    use abhiverse_win_input::capture::BgraFrame;
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 360;
+    if frame.width == WIDTH && frame.height == HEIGHT {
+        return frame;
+    }
+    let mut pixels = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+    for y in 0..HEIGHT {
+        let sy = y * frame.height / HEIGHT;
+        for x in 0..WIDTH {
+            let sx = x * frame.width / WIDTH;
+            let si = ((sy * frame.width + sx) * 4) as usize;
+            let di = ((y * WIDTH + x) * 4) as usize;
+            pixels[di..di + 4].copy_from_slice(&frame.pixels[si..si + 4]);
+        }
+    }
+    BgraFrame {
+        width: WIDTH,
+        height: HEIGHT,
+        pixels,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_annexb;
+
+    #[test]
+    fn annexb_splits_into_nal_units() {
+        let stream = [
+            0, 0, 0, 1, 0x67, 0xAA, // SPS-ish
+            0, 0, 1, 0x68, 0xBB, // PPS-ish (3-byte code)
+            0, 0, 0, 1, 0x65, 0x01, 0x02, // IDR
+        ];
+        let units = split_annexb(&stream);
+        assert_eq!(units.len(), 3);
+        assert_eq!(units[0], [0x67, 0xAA]);
+        assert_eq!(units[1], [0x68, 0xBB]);
+        assert_eq!(units[2], [0x65, 0x01, 0x02]);
+        assert!(split_annexb(&[]).is_empty());
+        assert!(split_annexb(&[1, 2, 3]).is_empty());
+    }
+
+    #[test]
+    fn openh264_encodes_a_pattern_frame() {
+        use abhiverse_win_input::capture::{bgra_to_i420, test_pattern_frame};
+        let config = openh264::encoder::EncoderConfig::new()
+            .set_bitrate_bps(1_200_000)
+            .max_frame_rate(10.0);
+        let mut encoder = openh264::encoder::Encoder::with_api_config(
+            openh264::OpenH264API::from_source(),
+            config,
+        )
+        .expect("encoder starts");
+        let frame = test_pattern_frame(640, 360, 1);
+        let yuv = openh264::formats::YUVBuffer::from_vec(bgra_to_i420(&frame), 640, 360);
+        let bitstream = encoder.encode(&yuv).expect("frame encodes");
+        let au = bitstream.to_vec();
+        assert!(!au.is_empty(), "encoded access unit must not be empty");
+        let units = split_annexb(&au);
+        assert!(!units.is_empty());
+        // First unit should be SPS (NAL type 7) for a fresh encoder.
+        assert_eq!(units[0][0] & 0x1F, 7);
+    }
 }
