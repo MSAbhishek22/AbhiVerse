@@ -13,7 +13,7 @@ pub const API_SERVICE_NAME: &str = "abhiverse-api";
 /// Machine name of the Windows agent service.
 pub const AGENT_SERVICE_NAME: &str = "abhiverse-agent-windows";
 /// Protocol version. Bump on breaking payload changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Response body for `GET /health`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +262,10 @@ pub struct CreateTransferRequest {
     /// SHA-256 of the whole file, hex. The end-to-end integrity anchor.
     pub sha256: String,
     pub total_chunks: u32,
+    /// Client-generated unique ID for this create request, covered
+    /// by the signature: legitimately duplicated creates (same file,
+    /// same second) stay distinguishable from replayed requests.
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,8 +287,14 @@ pub struct TransferListResponse {
     pub transfers: Vec<TransferView>,
 }
 
-pub fn transfer_create_message(from_id: &str, to_id: &str, sha256: &str, timestamp: i64) -> String {
-    format!("abhiverse-transfer-create:{from_id}:{to_id}:{sha256}:{timestamp}")
+pub fn transfer_create_message(
+    from_id: &str,
+    to_id: &str,
+    sha256: &str,
+    timestamp: i64,
+    request_id: &str,
+) -> String {
+    format!("abhiverse-transfer-create:{from_id}:{to_id}:{sha256}:{timestamp}:{request_id}")
 }
 
 pub fn chunk_upload_message(
@@ -321,6 +331,9 @@ pub struct CreateSessionRequest {
     pub device_id: String,
     pub controller_id: String,
     pub sdp_offer: String,
+    /// Client-generated unique ID, covered by the signature (see
+    /// `CreateTransferRequest::request_id`).
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,6 +451,9 @@ pub fn session_create_message(
     controller_id: &str,
     offer_sha256: &str,
     timestamp: i64,
+    request_id: &str,
 ) -> String {
-    format!("abhiverse-session-create:{device_id}:{controller_id}:{offer_sha256}:{timestamp}")
+    format!(
+        "abhiverse-session-create:{device_id}:{controller_id}:{offer_sha256}:{timestamp}:{request_id}"
+    )
 }
