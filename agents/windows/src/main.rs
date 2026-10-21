@@ -2,6 +2,8 @@ use std::io::Write;
 use std::time::Duration;
 
 use abhiverse_agent_windows::{load_identity, load_pairing, save_pairing, PairingRecord};
+
+mod remote;
 use abhiverse_identity::default_data_dir;
 use abhiverse_protocol::{
     now_unix, pairing_approve_message, pairing_reject_message, PairingStatus,
@@ -30,6 +32,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = arg_value(&args, "--send-file") {
         let identity = load_identity()?;
         return run_send_file(&identity, &path);
+    }
+
+    // --remote: answer remote desktop sessions (with local approval).
+    if args.iter().any(|a| a == "--remote") {
+        let identity = load_identity()?;
+        return remote::run(identity).map_err(|e| -> Box<dyn std::error::Error> { e });
     }
 
     // --receive: download files addressed to this device.
