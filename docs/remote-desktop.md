@@ -149,7 +149,22 @@ Flutter and Windows agree without a translation table.
   (`cargo run --example rtc_probe`) — signalling proven live; the
   data-channel connection itself awaits real-device verification
   (see the note at the top).
-- **006b:** agent video: DXGI capture → encode → WebRTC track;
-  controller `flutter_webrtc` viewer. *Needs a real Windows desktop.*
-- **006c:** input injection (`SendInput`) + controller touch/mouse UI.
-- **006d:** TURN deployment guide, session indicator UI, quality adaptation.
+- **006b (done in v0.5, runtime verification pending real hardware):**
+  agent video: DXGI Desktop Duplication capture (`crates/win-input`)
+  → BGRA→I420 → OpenH264 → WebRTC video track at 640×360/10fps,
+  with a synthetic test-pattern fallback when duplication is
+  unavailable; controller `flutter_webrtc` viewer (touch = click/
+  drag/right-click, special-keys row, type-text box). The capture
+  and injection code type-checks against the Windows target; the
+  encoder path is unit-tested with real encoded frames. First
+  on-device run: pair, start the agent with `--remote`, open the
+  viewer from the device list, approve at the agent prompt.
+- **006c (done in v0.5):** input injection via `SendInput`
+  (`crates/win-input`: web `KeyboardEvent.code` → virtual keys,
+  normalised mouse → absolute pixels), gated behind the agent's
+  `--allow-input` flag — without it, input events are only logged.
+- **006d (done in v0.5):** TURN deployment guide (`docs/turn.md`,
+  coturn + `ABHIVERSE_ICE_SERVERS_JSON`), persistent "REMOTE
+  SESSION ACTIVE" banner in the agent console for the whole
+  session. Still open: adaptive quality (bitrate/resolution by
+  network stats) and a tray-level indicator.
