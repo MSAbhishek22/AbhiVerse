@@ -4,7 +4,9 @@
 //! the fingerprint of the public key, so an ID cannot be claimed
 //! without the matching private key. The private key is stored in a
 //! `keypair.json` file inside the device's data directory; on Unix it
-//! is created with `0600` permissions. It must never be sent to the
+//! is created with `0600` permissions, and on Windows its DACL is
+//! replaced with a single full-access entry for the current user.
+//! It must never be sent to the
 //! coordination server or committed to source control.
 
 use std::path::{Path, PathBuf};
@@ -148,10 +150,100 @@ fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     f.write_all(contents.as_bytes())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    // TODO(Windows): set a restrictive ACL on the keypair file.
+    std::fs::write(path, contents)?;
+    // Fail closed: a keypair file we could not protect must not be
+    // left behind with default (inheriting) permissions.
+    if let Err(e) = restrict_to_current_user(path) {
+        let _ = std::fs::remove_file(path);
+        return Err(std::io::Error::other(format!(
+            "could not restrict keypair file ACL: {e}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)
+}
+
+/// Replace the file's DACL with a single entry: full access for the
+/// current user only (the Windows analogue of Unix `0600`).
+#[cfg(windows)]
+fn restrict_to_current_user(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE,
+        SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenUser, ACE_FLAGS, DACL_SECURITY_INFORMATION, TOKEN_QUERY,
+        TOKEN_USER,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)?;
+
+        // First call deliberately fails and reports the buffer size.
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut buf = vec![0u8; len as usize];
+        let filled = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr() as *mut std::ffi::c_void),
+            len,
+            &mut len,
+        );
+        let _ = CloseHandle(token);
+        filled?;
+
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: 0x001F_01FF, // FILE_ALL_ACCESS
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: ACE_FLAGS(0),
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: PWSTR(user.User.Sid.0 as *mut u16),
+            },
+        };
+        let mut acl: *mut windows::Win32::Security::ACL = std::ptr::null_mut();
+        let r = SetEntriesInAclW(Some(&[ea]), None, &mut acl);
+        if r.0 != 0 {
+            return Err(format!("SetEntriesInAclW failed: {r:?}").into());
+        }
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let r = SetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl as *const windows::Win32::Security::ACL),
+            None,
+        );
+        if !acl.is_null() {
+            let _ = LocalFree(HLOCAL(acl as *mut std::ffi::c_void));
+        }
+        if r.0 != 0 {
+            return Err(format!("SetNamedSecurityInfoW failed: {r:?}").into());
+        }
+        Ok(())
+    }
 }
 
 /// Default per-user data directory for an agent installation.
