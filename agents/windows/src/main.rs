@@ -26,6 +26,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_pairing(&api_url);
     }
 
+    // --send-file <path>: upload a file to the paired controller.
+    if let Some(path) = arg_value(&args, "--send-file") {
+        let identity = load_identity()?;
+        return run_send_file(&identity, &path);
+    }
+
+    // --receive: download files addressed to this device.
+    if args.iter().any(|a| a == "--receive") {
+        let identity = load_identity()?;
+        return run_receive(&identity);
+    }
+
     let identity = load_identity()?;
     if identity.created {
         println!("Created a new device identity for this computer.");
@@ -152,6 +164,7 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
                     api_url: api_url.to_string(),
                     pairing_id: created.pairing_id.clone(),
                     controller_name: view.controller_name.clone().unwrap_or_default(),
+                    controller_id: view.controller_id.clone().unwrap_or_default(),
                 };
                 save_pairing(&default_data_dir(), &record)?;
                 println!("Paired successfully with '{}'.", record.controller_name);
@@ -169,6 +182,191 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
             _ => {} // Pending / already decided: keep waiting
         }
     }
+}
+
+fn run_send_file(
+    identity: &abhiverse_identity::DeviceIdentity,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let data_dir = default_data_dir();
+    let Some(record) = load_pairing(&data_dir) else {
+        return Err("this device is not paired — run --pair first".into());
+    };
+    if record.controller_id.is_empty() {
+        return Err("pairing record has no controller_id — re-run --pair to refresh it".into());
+    }
+    let api = &record.api_url;
+    let file_path = std::path::Path::new(path);
+    let size = std::fs::metadata(file_path)?.len();
+    let sha = abhiverse_file_transfer::sha256_file(file_path)?;
+    let total = abhiverse_file_transfer::total_chunks(size);
+    let file_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("file path has no usable name")?
+        .to_string();
+
+    let ts = abhiverse_protocol::now_unix();
+    let message = abhiverse_protocol::transfer_create_message(
+        &identity.info.device_id,
+        &record.controller_id,
+        &sha,
+        ts,
+    );
+    let view: abhiverse_protocol::TransferView = ureq::post(&format!("{api}/transfers"))
+        .set("x-abhiverse-timestamp", &ts.to_string())
+        .set("x-abhiverse-signature", &identity.sign(&message))
+        .send_json(serde_json::json!({
+            "from_id": identity.info.device_id,
+            "to_id": record.controller_id,
+            "file_name": file_name,
+            "size_bytes": size,
+            "sha256": sha,
+            "total_chunks": total,
+        }))?
+        .into_json()?;
+    println!(
+        "Transfer {} created ({size} bytes, {total} chunks, sha256 {sha})",
+        view.transfer_id
+    );
+
+    let mut file = std::fs::File::open(file_path)?;
+    for index in 0..total {
+        let len = abhiverse_file_transfer::chunk_len(size, index) as usize;
+        let mut buf = vec![0u8; len];
+        file.seek(SeekFrom::Start(
+            index as u64 * abhiverse_file_transfer::CHUNK_SIZE,
+        ))?;
+        file.read_exact(&mut buf)?;
+        let ts = abhiverse_protocol::now_unix();
+        let chunk_hash = abhiverse_file_transfer::sha256_hex(&buf);
+        let message =
+            abhiverse_protocol::chunk_upload_message(&view.transfer_id, index, &chunk_hash, ts);
+        ureq::put(&format!(
+            "{api}/transfers/{}/chunks/{index}",
+            view.transfer_id
+        ))
+        .set("x-abhiverse-timestamp", &ts.to_string())
+        .set("x-abhiverse-signature", &identity.sign(&message))
+        .send_bytes(&buf)?;
+        println!("  chunk {}/{} uploaded", index + 1, total);
+    }
+    if total == 0 {
+        println!("  (empty file — no chunks to upload)");
+    }
+
+    let ts = abhiverse_protocol::now_unix();
+    let message = abhiverse_protocol::transfer_complete_message(&view.transfer_id, ts);
+    let done: abhiverse_protocol::TransferView =
+        ureq::post(&format!("{api}/transfers/{}/complete", view.transfer_id))
+            .set("x-abhiverse-timestamp", &ts.to_string())
+            .set("x-abhiverse-signature", &identity.sign(&message))
+            .send_json(serde_json::json!({}))?
+            .into_json()?;
+    println!(
+        "Sent '{}' — server verified the file hash (status: {:?}).",
+        file_name, done.status
+    );
+    println!(
+        "Your controller can now download it (transfer {}).",
+        view.transfer_id
+    );
+    Ok(())
+}
+
+fn run_receive(
+    identity: &abhiverse_identity::DeviceIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read as _;
+    let data_dir = default_data_dir();
+    let Some(record) = load_pairing(&data_dir) else {
+        return Err("this device is not paired — run --pair first".into());
+    };
+    let api = &record.api_url;
+    let device_id = &identity.info.device_id;
+    let list: abhiverse_protocol::TransferListResponse =
+        ureq::get(&format!("{api}/transfers?for={device_id}"))
+            .call()?
+            .into_json()?;
+    let receive_dir = data_dir.join("received");
+    std::fs::create_dir_all(&receive_dir)?;
+    let mut handled = 0;
+    for view in &list.transfers {
+        if view.status != abhiverse_protocol::TransferStatus::Complete {
+            println!(
+                "Transfer {} ('{}') is {:?} — waiting for the sender to finish.",
+                view.transfer_id, view.file_name, view.status
+            );
+            continue;
+        }
+        let already = receive_dir.join(&view.file_name);
+        if already.exists()
+            && abhiverse_file_transfer::sha256_file(&already)
+                .ok()
+                .as_deref()
+                == Some(view.sha256.as_str())
+        {
+            println!(
+                "'{}' already received and verified — skipping.",
+                view.file_name
+            );
+            handled += 1;
+            continue;
+        }
+        let progress_path = receive_dir.join(format!("{}.json", view.transfer_id));
+        let mut progress = abhiverse_file_transfer::ReceiveProgress::load(&progress_path)
+            .unwrap_or_else(|| {
+                abhiverse_file_transfer::ReceiveProgress::new(
+                    &view.transfer_id,
+                    &view.file_name,
+                    view.size_bytes,
+                    &view.sha256,
+                )
+            });
+        for index in progress.missing() {
+            let ts = abhiverse_protocol::now_unix();
+            let message = abhiverse_protocol::chunk_download_message(&view.transfer_id, index, ts);
+            let mut bytes = Vec::new();
+            ureq::get(&format!(
+                "{api}/transfers/{}/chunks/{index}",
+                view.transfer_id
+            ))
+            .set("x-abhiverse-timestamp", &ts.to_string())
+            .set("x-abhiverse-signature", &identity.sign(&message))
+            .call()?
+            .into_reader()
+            .read_to_end(&mut bytes)?;
+            abhiverse_file_transfer::write_chunk(&receive_dir, &view.transfer_id, index, &bytes)?;
+            progress.received.push(index);
+            progress.save(&progress_path)?;
+            println!(
+                "  '{}' chunk {}/{} downloaded",
+                view.file_name,
+                progress.received.len(),
+                view.total_chunks.max(1)
+            );
+        }
+        if view.total_chunks == 0 {
+            let name = abhiverse_file_transfer::sanitize_file_name(&view.file_name)
+                .ok_or("unsafe file name from server")?;
+            std::fs::write(receive_dir.join(name), b"")?;
+            println!("Received '{}' (empty file)", view.file_name);
+        } else {
+            let out = abhiverse_file_transfer::finish_download(&receive_dir, &progress)?;
+            println!(
+                "Received '{}' -> {} (SHA-256 verified locally)",
+                view.file_name,
+                out.display()
+            );
+        }
+        let _ = std::fs::remove_file(&progress_path);
+        handled += 1;
+    }
+    if handled == 0 && list.transfers.is_empty() {
+        println!("No transfers addressed to this device.");
+    }
+    Ok(())
 }
 
 fn run_revoke(
