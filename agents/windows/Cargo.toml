@@ -14,6 +14,8 @@ abhiverse-protocol = { path = "../../crates/protocol" }
 abhiverse-identity = { path = "../../crates/identity" }
 abhiverse-file-transfer = { path = "../../crates/file-transfer" }
 ureq = { version = "2", features = ["json"] }
+webrtc = "0.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
