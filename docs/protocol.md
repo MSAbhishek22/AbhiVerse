@@ -91,11 +91,18 @@ Full design in `docs/remote-desktop.md`. Summary:
 - `GET /config/rtc` → `RtcConfig` (STUN default; TURN via
   `ABHIVERSE_ICE_SERVERS_JSON`).
 - `POST /sessions {device_id, controller_id, sdp_offer}` → `201`.
-  Since v0.5 the controller must sign the request
-  (`abhiverse-session-create:{device_id}:{controller_id}:{sha256(offer)}:{ts}`),
-  and transfer creates (`abhiverse-transfer-create:…`) and
-  revocations (`abhiverse-revoke:…`) are likewise accepted from
-  either the device's key or its paired controller's key.
+  Since v0.5 the controller must sign the request, and since
+  protocol v2 (v0.5.2) create requests carry a client-generated
+  `request_id` that is part of the signed message
+  (`abhiverse-session-create:{device_id}:{controller_id}:{sha256(offer)}:{ts}:{request_id}`,
+  `abhiverse-transfer-create:{from}:{to}:{sha256}:{ts}:{request_id}`).
+  The API records every accepted signature and rejects a second
+  presentation of it inside the timestamp window (replay
+  protection); the `request_id` keeps a legitimate duplicate
+  create — same file, same second — distinguishable from a replay.
+  Revocations (`abhiverse-revoke:…`) are accepted from either the
+  device's key or its paired controller's key, and revoking a
+  device immediately ends its live remote sessions.
   (paired controller only; offers expire after 120 s).
 - `GET /sessions/{id}?as={participant}` / `GET /sessions?for={device_id}`.
 - `POST /sessions/{id}/answer {sdp_answer}` — agent-signed over
