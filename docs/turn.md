@@ -73,8 +73,34 @@ at least one `relay` candidate.
 - **Long-term credentials** (as above) are the simple option. For a
   public hosted deployment, prefer coturn's `--use-auth-secret`
   with short-lived, per-session credentials minted by the API —
-  tracked as future work; the static JSON above is the v1 route.
+  implemented in v0.5.1 — see "Short-lived credentials" below; the
+  static JSON above remains the simple self-host route.
 - TURN relays encrypted DTLS traffic; the relay operator cannot see
   screen content or input, only packet sizes and timing.
 - Self-hosters can run coturn on the same box as the API; the API
   itself only serves the JSON config and never touches media.
+
+## Short-lived credentials (recommended for hosting)
+
+Static TURN passwords (`lt-cred-mech` with a user database) end up
+baked into every client. Prefer coturn's REST/auth-secret scheme:
+
+1. Run coturn with `--use-auth-secret
+   --static-auth-secret=<SECRET>` (keep `lt-cred-mech` enabled).
+2. Give the *API* the same secret — clients never see it:
+
+   ```bash
+   ABHIVERSE_TURN_SECRET=<SECRET> \
+   ABHIVERSE_TURN_URLS="turn:turn.example.com:3478,turns:turn.example.com:5349" \
+   abhiverse-api
+   ```
+
+3. `GET /config/rtc` now returns the public STUN entry plus a TURN
+   entry whose username is an expiry timestamp (now + 3600 s) and
+   whose credential is `base64(HMAC-SHA1(secret, username))` —
+   exactly what coturn validates. Credentials mint per request and
+   expire on their own; rotate the secret on both sides to
+   invalidate outstanding ones early.
+
+`ABHIVERSE_ICE_SERVERS_JSON`, when set, still takes precedence (use
+it for static credentials or exotic setups).
