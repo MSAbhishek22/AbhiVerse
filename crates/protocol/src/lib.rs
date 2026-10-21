@@ -218,3 +218,69 @@ pub fn now_unix() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+// ---------- Task 005: file transfer ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferStatus {
+    /// Created; chunks are being uploaded.
+    Receiving,
+    /// All chunks arrived and the server verified the file hash.
+    Complete,
+    /// Hash verification failed at completion.
+    Failed,
+}
+
+/// Create a transfer. For agent senders this must be accompanied by
+/// the signature headers; controller senders are unauthenticated in
+/// v0.3 (controller keys are a documented future task).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTransferRequest {
+    pub from_id: String,
+    pub to_id: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    /// SHA-256 of the whole file, hex. The end-to-end integrity anchor.
+    pub sha256: String,
+    pub total_chunks: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferView {
+    pub transfer_id: String,
+    pub from_id: String,
+    pub to_id: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub total_chunks: u32,
+    /// Indexes the server currently holds — the resume source of truth.
+    pub received_chunks: Vec<u32>,
+    pub status: TransferStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferListResponse {
+    pub transfers: Vec<TransferView>,
+}
+
+pub fn transfer_create_message(from_id: &str, to_id: &str, sha256: &str, timestamp: i64) -> String {
+    format!("abhiverse-transfer-create:{from_id}:{to_id}:{sha256}:{timestamp}")
+}
+
+pub fn chunk_upload_message(
+    transfer_id: &str,
+    index: u32,
+    chunk_sha256: &str,
+    timestamp: i64,
+) -> String {
+    format!("abhiverse-chunk:{transfer_id}:{index}:{chunk_sha256}:{timestamp}")
+}
+
+pub fn chunk_download_message(transfer_id: &str, index: u32, timestamp: i64) -> String {
+    format!("abhiverse-download:{transfer_id}:{index}:{timestamp}")
+}
+
+pub fn transfer_complete_message(transfer_id: &str, timestamp: i64) -> String {
+    format!("abhiverse-transfer-complete:{transfer_id}:{timestamp}")
+}
