@@ -24,7 +24,10 @@ async fn health_returns_ok_json() {
     assert_eq!(health.service, "abhiverse-api");
     assert_eq!(health.status, "ok");
     assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
-    assert_eq!(health.protocol_version, 1);
+    assert_eq!(
+        health.protocol_version,
+        abhiverse_protocol::PROTOCOL_VERSION
+    );
 }
 
 #[tokio::test]
