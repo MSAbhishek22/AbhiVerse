@@ -118,7 +118,13 @@ async fn devices_and_transfers_survive_restart() {
     let ts = now_unix();
     let headers = signed_at(
         &controller,
-        &transfer_create_message(&controller.info.device_id, &agent.info.device_id, &hash, ts),
+        &transfer_create_message(
+            &controller.info.device_id,
+            &agent.info.device_id,
+            &hash,
+            ts,
+            "persist-req-1",
+        ),
         ts,
     );
     let (s, view) = call(
@@ -127,7 +133,7 @@ async fn devices_and_transfers_survive_restart() {
         "/transfers",
         Some(json!({
             "from_id": controller.info.device_id, "to_id": agent.info.device_id,
-            "file_name": "big.bin", "size_bytes": data.len(), "sha256": hash, "total_chunks": 2,
+            "file_name": "big.bin", "size_bytes": data.len(), "sha256": hash, "total_chunks": 2, "request_id": "persist-req-1",
         })),
         headers,
     )
