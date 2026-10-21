@@ -7,20 +7,22 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.2 — Tasks 001–004.** Local foundation plus device
+> **Status: v0.3 — Tasks 001–005.** Local foundation, device
 > identity (Ed25519 keys), pairing with signed approval, presence
-> heartbeats and revocation. File transfer and remote desktop are
-> *not* implemented yet — see the roadmap below.
+> heartbeats, revocation, and chunked file transfer with SHA-256
+> integrity and resume. Remote desktop is *not* implemented yet —
+> see the roadmap below.
 
 ## What exists today
 
 | Component | Path | State |
 |---|---|---|
-| Coordination API (Rust + Axum) | `server/api` | Health, pairing, presence and revocation endpoints; binds to localhost; in-memory state |
-| Windows agent (Rust) | `agents/windows` | Device identity, `--pair` flow with on-device approval, signed heartbeats, `--revoke`. No device capabilities yet |
-| Android controller (Flutter) | `apps/controller` | Connection status, paired-device list with online presence, pairing by 6-digit code |
+| Coordination API (Rust + Axum) | `server/api` | Health, pairing, presence, revocation and file-transfer endpoints; binds to localhost; in-memory state, chunk store on disk |
+| Windows agent (Rust) | `agents/windows` | Device identity, `--pair` flow with on-device approval, signed heartbeats, `--send-file` / `--receive`, `--revoke`. No screen/input/power capabilities yet |
+| Android controller (Flutter) | `apps/controller` | Connection status, paired-device list with online presence, pairing by 6-digit code, send files to a device, download & verify incoming files |
 | Shared protocol types | `crates/protocol` | Health, device, pairing and presence payloads, protocol v1 |
 | Device identity (Rust) | `crates/identity` | Ed25519 key generation/storage (0600), fingerprint device IDs, sign/verify |
+| File transfer (Rust) | `crates/file-transfer` | 256 KiB chunk plans, SHA-256 integrity, resumable assembly, safe file names |
 
 ## Prerequisites
 
@@ -63,6 +65,8 @@ cargo run -p abhiverse-agent-windows -- --identity  # device ID + public identit
 cargo run -p abhiverse-agent-windows -- --pair --api http://127.0.0.1:8080
 cargo run -p abhiverse-agent-windows                # runs until Ctrl+C (heartbeats if paired)
 cargo run -p abhiverse-agent-windows -- --revoke    # unpair/revoke this device
+cargo run -p abhiverse-agent-windows -- --send-file ~/photo.jpg   # to the paired phone
+cargo run -p abhiverse-agent-windows -- --receive   # download files sent to this computer
 ```
 
 On first run the agent creates an Ed25519 key pair in its data
@@ -112,14 +116,16 @@ flutter analyze
 flutter test
 ```
 
-Verified for v0.2 (Linux dev host, Rust 1.99, Flutter 3.47):
-Rust — 12 tests passing, clippy + rustfmt clean. Flutter —
-`flutter analyze` clean, 8 tests passing. Live end-to-end on
-`127.0.0.1:8080`: agent generated a pairing code, a controller
-claimed it, approval was confirmed at the agent prompt, the device
-appeared in the Flutter app's device list, heartbeats brought it
-online, and `--revoke` removed it and blocked further heartbeats.
-Android APK builds require the Android SDK (`flutter doctor`).
+Verified for v0.3 (Linux dev host, Rust 1.99, Flutter 3.47):
+Rust — 19 tests passing, clippy + rustfmt clean. Flutter —
+`flutter analyze` clean, 10 tests passing. Live end-to-end on
+`127.0.0.1:8080`: pairing → a 700,000-byte binary sent from the
+agent to the controller and hash-verified → a 500,003-byte file
+sent from the controller and received by the agent with local
+SHA-256 verification → plus a full round trip driven by the real
+Flutter client code (download+verify a 400,000-byte incoming file,
+send a file the agent then received intact). Android APK builds
+require the Android SDK (`flutter doctor`).
 
 ## Repository layout
 
