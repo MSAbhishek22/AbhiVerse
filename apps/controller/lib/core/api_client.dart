@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'config.dart';
+import 'controller_identity.dart';
 import 'health_client.dart';
 
 /// A paired device as reported by `GET /devices` (mirrors the Rust
@@ -66,13 +67,35 @@ class ClaimResult {
 
 /// Client for the devices + pairing endpoints of the API.
 class ApiClient {
-  ApiClient({required this.config, http.Client? client, String? controllerId})
-      : _client = client ?? http.Client(),
-        controllerId =
-            controllerId ?? 'controller-${Random.secure().nextInt(1 << 32)}';
+  ApiClient({
+    required this.config,
+    http.Client? client,
+    String? controllerId,
+    ControllerIdentity? identity,
+  })  : _client = client ?? http.Client(),
+        _identity = identity,
+        controllerId = identity?.deviceId ??
+            controllerId ??
+            'controller-${Random.secure().nextInt(1 << 32)}';
+
+  final ControllerIdentity? _identity;
+
+  bool get hasIdentity => _identity != null;
+
+  /// Signature headers for a protocol [message] that embeds
+  /// timestamp [ts] — the header and the message must carry the
+  /// same timestamp, the API rebuilds the message from the header.
+  Future<Map<String, String>> _signatureHeaders(int ts, String message) async {
+    final identity = _identity;
+    if (identity == null) return const {};
+    return {
+      'x-abhiverse-timestamp': '$ts',
+      'x-abhiverse-signature': await identity.sign(message),
+    };
+  }
 
   final AbhiverseEndpointConfig config;
-  final http.Client _client;
+  http.Client _client;
 
   /// Ephemeral controller ID for this app install session. A stable
   /// identity backed by secure storage lands with controller keys.
@@ -107,6 +130,11 @@ class ApiClient {
     required String code,
     required String controllerName,
   }) async {
+    final identity = _identity;
+    if (identity == null) {
+      throw const AbhiverseApiException(
+          'This phone has no identity yet — restart the app to create one.');
+    }
     final http.Response response;
     try {
       response = await _client
@@ -115,8 +143,7 @@ class ApiClient {
             headers: {'content-type': 'application/json'},
             body: jsonEncode({
               'code': code,
-              'controller_id': controllerId,
-              'controller_name': controllerName,
+              'controller': identity.deviceInfoJson(nameOverride: controllerName),
             }),
           )
           .timeout(const Duration(seconds: 5));
@@ -159,6 +186,16 @@ class ApiClient {
     final digest = sha256.convert(bytes).toString();
     final totalChunks =
         bytes.isEmpty ? 0 : (bytes.length + transferChunkSize - 1) ~/ transferChunkSize;
+    final ts = nowUnix();
+    final headers = await _signatureHeaders(
+      ts,
+      transferCreateMessage(
+        fromId: controllerId,
+        toId: toId,
+        sha256Hex: digest,
+        timestamp: ts,
+      ),
+    );
     final created = await _postJson('/transfers', {
       'from_id': controllerId,
       'to_id': toId,
@@ -166,7 +203,7 @@ class ApiClient {
       'size_bytes': bytes.length,
       'sha256': digest,
       'total_chunks': totalChunks,
-    }, expected: 201);
+    }, expected: 201, headers: headers);
     final view = TransferView.fromJson(created);
     for (var i = 0; i < totalChunks; i++) {
       final start = i * transferChunkSize;
@@ -241,26 +278,72 @@ class ApiClient {
     String path,
     Map<String, dynamic> body, {
     required int expected,
+    Map<String, String> headers = const {},
   }) async {
+    // One retry on transport failure: on lossy networks a pooled
+    // connection can die after the server processed the request but
+    // before its response arrived ("connection closed before full
+    // header"). The retry uses a fresh connection. Note the server
+    // may have applied the first attempt (e.g. a transfer create) —
+    // callers treat the returned view as authoritative, and an
+    // orphaned duplicate is garbage-collected by expiry in practice.
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final http.Response response;
+      try {
+        response = await _client
+            .post(
+              _uri(path),
+              headers: {'content-type': 'application/json', ...headers},
+              body: jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {
+        if (attempt == 1) {
+          throw const AbhiverseApiException(
+              'Could not reach the Abhiverse server.');
+        }
+        _client.close();
+        _client = http.Client();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        continue;
+      }
+      if (response.statusCode != expected) {
+        throw AbhiverseApiException(
+            'Server returned HTTP ${response.statusCode} for $path.');
+      }
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    }
+    throw StateError('unreachable');
+  }
+
+
+  /// Revoke a paired device using this controller's signature
+  /// (the API also accepts the device's own signature).
+  Future<void> revokeDevice(String deviceId) async {
+    final identity = _identity;
+    if (identity == null) {
+      throw const AbhiverseApiException('This phone has no identity yet.');
+    }
+    final ts = nowUnix();
+    final signature = await identity
+        .sign(revokeMessage(deviceId: deviceId, timestamp: ts));
     final http.Response response;
     try {
       response = await _client
-          .post(
-            _uri(path),
+          .delete(
+            _uri('/devices/$deviceId'),
             headers: {'content-type': 'application/json'},
-            body: jsonEncode(body),
+            body: jsonEncode({'timestamp': ts, 'signature': signature}),
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 5));
     } catch (_) {
       throw const AbhiverseApiException('Could not reach the Abhiverse server.');
     }
-    if (response.statusCode != expected) {
+    if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for $path.');
+          'Server returned HTTP ${response.statusCode} for revoke.');
     }
-    return jsonDecode(response.body) as Map<String, dynamic>;
   }
-
 
   /// ICE servers this deployment asks peers to use (STUN/TURN).
   Future<List<IceServerConfig>> fetchRtcConfig() async {
@@ -288,11 +371,22 @@ class ApiClient {
     required String deviceId,
     required String sdpOffer,
   }) async {
+    final offerHash = sha256.convert(utf8.encode(sdpOffer)).toString();
+    final ts = nowUnix();
+    final headers = await _signatureHeaders(
+      ts,
+      sessionCreateMessage(
+        deviceId: deviceId,
+        controllerId: controllerId,
+        offerSha256Hex: offerHash,
+        timestamp: ts,
+      ),
+    );
     final created = await _postJson('/sessions', {
       'device_id': deviceId,
       'controller_id': controllerId,
       'sdp_offer': sdpOffer,
-    }, expected: 201);
+    }, expected: 201, headers: headers);
     return SessionView.fromJson(created);
   }
 
