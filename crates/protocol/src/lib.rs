@@ -79,6 +79,23 @@ mod tests {
     }
 
     #[test]
+    fn input_event_round_trips_as_tagged_json() {
+        let event = InputEvent::MouseMove { x: 0.5, y: 0.25 };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, "{\"type\":\"mouse_move\",\"x\":0.5,\"y\":0.25}");
+        let back: InputEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
+        let key: InputEvent =
+            serde_json::from_str("{\"type\":\"key_down\",\"code\":\"KeyA\"}").unwrap();
+        assert_eq!(
+            key,
+            InputEvent::KeyDown {
+                code: "KeyA".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn agent_info_reports_current_platform() {
         let info = AgentInfo::current("0.1.0");
         assert_eq!(info.service, AGENT_SERVICE_NAME);
@@ -283,4 +300,133 @@ pub fn chunk_download_message(transfer_id: &str, index: u32, timestamp: i64) -> 
 
 pub fn transfer_complete_message(transfer_id: &str, timestamp: i64) -> String {
     format!("abhiverse-transfer-complete:{transfer_id}:{timestamp}")
+}
+
+// ---------- Task 006: remote desktop signalling ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Offered,
+    Answered,
+    Rejected,
+    Ended,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSessionRequest {
+    pub device_id: String,
+    pub controller_id: String,
+    pub sdp_offer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionView {
+    pub session_id: String,
+    pub device_id: String,
+    pub controller_id: String,
+    pub status: SessionStatus,
+    pub sdp_offer: String,
+    pub sdp_answer: Option<String>,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionListResponse {
+    pub sessions: Vec<SessionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerSessionRequest {
+    pub sdp_answer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceCandidateRequest {
+    pub from_id: String,
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_mline_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceCandidateView {
+    pub seq: u64,
+    pub from_id: String,
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_mline_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceCandidateListResponse {
+    pub candidates: Vec<IceCandidateView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndSessionRequest {
+    pub from_id: String,
+}
+
+pub fn session_answer_message(session_id: &str, answer_sha256: &str, timestamp: i64) -> String {
+    format!("abhiverse-session-answer:{session_id}:{answer_sha256}:{timestamp}")
+}
+
+pub fn session_reject_message(session_id: &str, timestamp: i64) -> String {
+    format!("abhiverse-session-reject:{session_id}:{timestamp}")
+}
+
+pub fn session_end_message(session_id: &str, timestamp: i64) -> String {
+    format!("abhiverse-session-end:{session_id}:{timestamp}")
+}
+
+// ---------- RTC configuration ----------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceServerConfig {
+    pub urls: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RtcConfig {
+    pub ice_servers: Vec<IceServerConfig>,
+}
+
+impl RtcConfig {
+    /// Default: a public STUN server only (no relay). Operators add
+    /// TURN via `ABHIVERSE_ICE_SERVERS_JSON` on the API.
+    pub fn default_stun() -> Self {
+        Self {
+            ice_servers: vec![IceServerConfig {
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                username: None,
+                credential: None,
+            }],
+        }
+    }
+}
+
+// ---------- Input events (data channel) ----------
+
+/// Label of the WebRTC data channel that carries input events.
+pub const INPUT_CHANNEL_LABEL: &str = "abhiverse-input";
+
+/// Input events sent by the controller on the input data channel.
+/// Coordinates are normalised to 0.0..=1.0 of the remote frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputEvent {
+    MouseMove { x: f64, y: f64 },
+    MouseDown { button: u8 },
+    MouseUp { button: u8 },
+    Scroll { dx: f64, dy: f64 },
+    KeyDown { code: String },
+    KeyUp { code: String },
+    Text { text: String },
 }
