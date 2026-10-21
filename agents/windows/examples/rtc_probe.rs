@@ -130,9 +130,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = pc.local_description().await.expect("local description");
 
     let offer_hash = abhiverse_file_transfer::sha256_hex(local.sdp.as_bytes());
+    let request_id = abhiverse_file_transfer::sha256_hex(
+        format!("probe:{controller_id}:{}", std::process::id()).as_bytes(),
+    )[..32]
+        .to_string();
     let ts = abhiverse_protocol::now_unix();
-    let message =
-        abhiverse_protocol::session_create_message(&device_id, &controller_id, &offer_hash, ts);
+    let message = abhiverse_protocol::session_create_message(
+        &device_id,
+        &controller_id,
+        &offer_hash,
+        ts,
+        &request_id,
+    );
     let view: SessionView = client
         .post(format!("{api}/sessions"))
         .header("x-abhiverse-timestamp", ts.to_string())
@@ -141,6 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             device_id: device_id.clone(),
             controller_id: controller_id.clone(),
             sdp_offer: local.sdp.clone(),
+            request_id: request_id.clone(),
         })
         .send()
         .await?
