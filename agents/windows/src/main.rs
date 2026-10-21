@@ -35,9 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --remote: answer remote desktop sessions (with local approval).
+    // --allow-input additionally enables injecting the controller's
+    // input into this desktop (006c); without it, input is only logged.
     if args.iter().any(|a| a == "--remote") {
+        let allow_input = args.iter().any(|a| a == "--allow-input");
         let identity = load_identity()?;
-        return remote::run(identity).map_err(|e| -> Box<dyn std::error::Error> { e });
+        return remote::run(identity, allow_input).map_err(|e| -> Box<dyn std::error::Error> { e });
     }
 
     // --receive: download files addressed to this device.
@@ -124,7 +127,21 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
             .into_json()?;
     println!();
     println!("  Pairing code: {}", created.code);
-    println!("  Enter this code in the Abhiverse app within 5 minutes.");
+    println!("  Enter this code in the Abhiverse app within 5 minutes,");
+    println!("  or scan this QR code with the app:");
+    println!();
+    match qrcode::QrCode::new(format!("abhiverse://pair?code={}", created.code)) {
+        Ok(qr) => {
+            let rendered = qr
+                .render::<qrcode::render::unicode::Dense1x2>()
+                .quiet_zone(true)
+                .build();
+            for line in rendered.lines() {
+                println!("  {line}");
+            }
+        }
+        Err(e) => println!("  (could not render QR code: {e})"),
+    }
     println!();
 
     let mut decided = false;
