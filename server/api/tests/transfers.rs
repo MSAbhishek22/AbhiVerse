@@ -88,8 +88,14 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     ))
 }
 
-/// Pair a fresh agent with controller "ctrl-1"; returns (app, identity).
-async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity) {
+fn make_controller(tag: &str) -> DeviceIdentity {
+    let dir = temp_dir(&format!("{tag}-ctrl"));
+    let _ = std::fs::remove_dir_all(&dir);
+    ensure_identity(&dir, "Pixel", DeviceKind::Controller).unwrap()
+}
+
+/// Pair a fresh agent with a signed controller identity.
+async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity, DeviceIdentity) {
     let dir = temp_dir(tag);
     let _ = std::fs::remove_dir_all(&dir);
     let agent = ensure_identity(&dir, "Laptop", DeviceKind::Agent).unwrap();
@@ -104,11 +110,12 @@ async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity) {
     .await;
     let pairing_id = created["pairing_id"].as_str().unwrap().to_string();
     let code = created["code"].as_str().unwrap().to_string();
+    let controller = make_controller(tag);
     let (s, _) = call(
         app.clone(),
         Method::POST,
         "/pairing/claim",
-        Some(json!({ "code": code, "controller_id": "ctrl-1", "controller_name": "Pixel" })),
+        Some(json!({ "code": code, "controller": controller.info })),
         vec![],
     )
     .await;
@@ -123,7 +130,16 @@ async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity) {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    (app, agent)
+    (app, agent, controller)
+}
+
+fn ctrl_headers(controller: &DeviceIdentity, to: &str, sha: &str) -> Vec<(String, String)> {
+    let ts = now_unix();
+    signed_at(
+        controller,
+        &abhiverse_protocol::transfer_create_message(&controller.info.device_id, to, sha, ts),
+        ts,
+    )
 }
 
 fn sample_data() -> Vec<u8> {
@@ -132,7 +148,7 @@ fn sample_data() -> Vec<u8> {
 
 #[tokio::test]
 async fn controller_to_agent_with_resume_and_signed_download() {
-    let (app, agent) = paired_app("c2a").await;
+    let (app, agent, controller) = paired_app("c2a").await;
     let data = sample_data();
     let hash = sha256_hex(&data);
     let total = total_chunks(data.len() as u64);
@@ -144,10 +160,10 @@ async fn controller_to_agent_with_resume_and_signed_download() {
         Method::POST,
         "/transfers",
         Some(json!({
-            "from_id": "ctrl-1", "to_id": agent.info.device_id, "file_name": "notes.bin",
+            "from_id": controller.info.device_id, "to_id": agent.info.device_id, "file_name": "notes.bin",
             "size_bytes": data.len(), "sha256": hash, "total_chunks": total,
         })),
-        vec![],
+        ctrl_headers(&controller, &agent.info.device_id, &hash),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -220,12 +236,12 @@ async fn controller_to_agent_with_resume_and_signed_download() {
 
 #[tokio::test]
 async fn agent_to_controller_requires_signatures() {
-    let (app, agent) = paired_app("a2c").await;
+    let (app, agent, controller) = paired_app("a2c").await;
     let data = sample_data();
     let hash = sha256_hex(&data);
     let total = total_chunks(data.len() as u64);
     let body = json!({
-        "from_id": agent.info.device_id, "to_id": "ctrl-1", "file_name": "photo.bin",
+        "from_id": agent.info.device_id, "to_id": controller.info.device_id, "file_name": "photo.bin",
         "size_bytes": data.len(), "sha256": hash, "total_chunks": total,
     });
 
@@ -243,7 +259,7 @@ async fn agent_to_controller_requires_signatures() {
     let ts = now_unix();
     let headers = signed_at(
         &agent,
-        &transfer_create_message(&agent.info.device_id, "ctrl-1", &hash, ts),
+        &transfer_create_message(&agent.info.device_id, &controller.info.device_id, &hash, ts),
         ts,
     );
     let (status, view) = call(app.clone(), Method::POST, "/transfers", Some(body), headers).await;
@@ -310,7 +326,7 @@ async fn agent_to_controller_requires_signatures() {
     let (_, list) = call(
         app.clone(),
         Method::GET,
-        "/transfers?for=ctrl-1",
+        &format!("/transfers?for={}", controller.info.device_id),
         None,
         vec![],
     )
@@ -320,7 +336,7 @@ async fn agent_to_controller_requires_signatures() {
 
 #[tokio::test]
 async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
-    let (app, agent) = paired_app("corrupt").await;
+    let (app, agent, controller) = paired_app("corrupt").await;
     // Unknown sender cannot create transfers to the agent.
     let (status, _) = call(
         app.clone(),
@@ -341,10 +357,10 @@ async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
         Method::POST,
         "/transfers",
         Some(json!({
-            "from_id": "ctrl-1", "to_id": agent.info.device_id, "file_name": "x.bin",
+            "from_id": controller.info.device_id, "to_id": agent.info.device_id, "file_name": "x.bin",
             "size_bytes": 3, "sha256": sha256_hex(b"abc"), "total_chunks": 1,
         })),
-        vec![],
+        ctrl_headers(&controller, &agent.info.device_id, &sha256_hex(b"abc")),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -382,10 +398,10 @@ async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
         Method::POST,
         "/transfers",
         Some(json!({
-            "from_id": "ctrl-1", "to_id": agent.info.device_id, "file_name": "../../evil.sh",
+            "from_id": controller.info.device_id, "to_id": agent.info.device_id, "file_name": "../../evil.sh",
             "size_bytes": 0, "sha256": sha256_hex(b""), "total_chunks": 0,
         })),
-        vec![],
+        ctrl_headers(&controller, &agent.info.device_id, &sha256_hex(b"")),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
