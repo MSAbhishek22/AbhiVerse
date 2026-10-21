@@ -30,9 +30,15 @@ it publicly.
 - Agent private keys live in `keypair.json` with `0600` permissions
   on Unix (Windows ACL hardening is still TODO).
 
-Known gaps: controllers do not yet hold keys (a controller is
-identified by name/ID only, so controller-initiated revocation is
-not authenticated yet), and API state is in-memory. Both are
+Closed in v0.5: controllers hold Ed25519 keys (device ID =
+fingerprint of the controller key, registered at pairing), so
+controller-originated transfers, session requests and
+controller-initiated revocation are all signature-verified; API
+state persists via `ABHIVERSE_STATE_FILE`. Remaining known gaps:
+the Windows keypair file relies on the user's profile ACLs
+(explicit ACL hardening still TODO), session/pairing state is
+kept in memory by design (short-lived), and hosted deployment
+issues are tracked separately. Both were
 scheduled before any hosted/public deployment.
 
 
@@ -46,7 +52,7 @@ scheduled before any hosted/public deployment.
   `received/` directory, under sanitised base names — nothing can
   write outside it or choose arbitrary paths on the device.
 - Controller-originated transfers are not yet cryptographically
-  authenticated (controllers hold no keys yet, same gap as
-  controller-initiated revocation); the API only accepts them from
-  the target device's paired controller ID. Treat v0.3 transfers as
-  a local-network feature until controller keys land.
+  authenticated since v0.5 (controllers hold Ed25519 keys and sign
+  transfer creates; chunk integrity additionally rests on the
+  declared whole-file SHA-256, verified by the API at completion
+  and again by the receiver).
