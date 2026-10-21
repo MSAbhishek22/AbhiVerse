@@ -1,0 +1,26 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+**/android/.gradle
+**/android/local.properties
+**/ios/Pods
+
+# Env / secrets
+.env
+*.env
+!.env.example
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
