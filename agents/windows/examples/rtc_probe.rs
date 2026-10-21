@@ -5,8 +5,12 @@
 //! connects over WebRTC, opens the `abhiverse-input` data channel
 //! and sends two input events. Exits 0 on success.
 //!
+//! The probe owns a real controller identity (Task 007): pass
+//! `--controller-dir <dir>` for its key storage and, for a first
+//! run, `--pair-code <code>` so it can claim the pairing itself.
+//!
 //! Usage: cargo run --example rtc_probe -- --api http://127.0.0.1:8080 \
-//!          --controller-id <paired-controller-id> --device-id <agent-device-id>
+//!          --controller-dir <dir> --device-id <agent-device-id> [--pair-code <code>]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,9 +37,27 @@ fn arg(args: &[String], flag: &str) -> Option<String> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let api = arg(&args, "--api").unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
-    let controller_id = arg(&args, "--controller-id").expect("--controller-id required");
+    let controller_dir = arg(&args, "--controller-dir").expect("--controller-dir required");
     let device_id = arg(&args, "--device-id").expect("--device-id required");
     let client = reqwest::Client::new();
+
+    // This probe IS a controller: it holds an Ed25519 identity and
+    // signs its session requests, exactly like the phone app.
+    let identity = abhiverse_identity::ensure_identity(
+        std::path::Path::new(&controller_dir),
+        "Probe Controller",
+        abhiverse_protocol::DeviceKind::Controller,
+    )?;
+    let controller_id = identity.info.device_id.clone();
+    if let Some(code) = arg(&args, "--pair-code") {
+        let resp = client
+            .post(format!("{api}/pairing/claim"))
+            .json(&serde_json::json!({ "code": code, "controller": identity.info }))
+            .send()
+            .await?;
+        println!("probe: pairing claim -> {}", resp.status());
+        resp.error_for_status()?;
+    }
 
     let rtc: RtcConfig = client
         .get(format!("{api}/config/rtc"))
@@ -107,8 +129,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = gather_complete.recv().await;
     let local = pc.local_description().await.expect("local description");
 
+    let offer_hash = abhiverse_file_transfer::sha256_hex(local.sdp.as_bytes());
+    let ts = abhiverse_protocol::now_unix();
+    let message =
+        abhiverse_protocol::session_create_message(&device_id, &controller_id, &offer_hash, ts);
     let view: SessionView = client
         .post(format!("{api}/sessions"))
+        .header("x-abhiverse-timestamp", ts.to_string())
+        .header("x-abhiverse-signature", identity.sign(&message))
         .json(&CreateSessionRequest {
             device_id: device_id.clone(),
             controller_id: controller_id.clone(),
