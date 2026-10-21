@@ -99,15 +99,19 @@ fn session_headers(
     controller: &DeviceIdentity,
     device_id: &str,
     offer: &str,
-) -> Vec<(String, String)> {
+) -> (Vec<(String, String)>, String) {
+    static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let request_id = format!("test-req-{n}");
     let ts = now_unix();
     let msg = abhiverse_protocol::session_create_message(
         device_id,
         &controller.info.device_id,
         &sha256_hex(offer.as_bytes()),
         ts,
+        &request_id,
     );
-    signed_at(controller, &msg, ts)
+    (signed_at(controller, &msg, ts), request_id)
 }
 
 const OFFER: &str = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\n";
@@ -131,7 +135,7 @@ async fn full_signalling_flow() {
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": "mallory", "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": "mallory", "sdp_offer": OFFER, "request_id": "mallory-1",
         })),
         vec![],
     )
@@ -139,14 +143,15 @@ async fn full_signalling_flow() {
     assert_eq!(s, StatusCode::FORBIDDEN);
 
     // The paired controller can — with its signature.
+    let (headers, rid) = session_headers(&controller, &dev, OFFER);
     let (s, view) = call(
         app.clone(),
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER, "request_id": rid,
         })),
-        session_headers(&controller, &dev, OFFER),
+        headers,
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
@@ -270,14 +275,15 @@ async fn agent_can_reject_and_end_with_signature() {
     let (app, agent, controller) = paired_app("reject").await;
     let dev = agent.info.device_id.clone();
 
+    let (headers, rid) = session_headers(&controller, &dev, OFFER);
     let (_, view) = call(
         app.clone(),
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER, "request_id": rid,
         })),
-        session_headers(&controller, &dev, OFFER),
+        headers,
     )
     .await;
     let sid = view["session_id"].as_str().unwrap().to_string();
@@ -306,14 +312,15 @@ async fn agent_can_reject_and_end_with_signature() {
     assert_eq!(view["status"], "rejected");
 
     // A second session: agent ends it himself after answering.
+    let (headers, rid) = session_headers(&controller, &dev, OFFER);
     let (_, view) = call(
         app.clone(),
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER, "request_id": rid,
         })),
-        session_headers(&controller, &dev, OFFER),
+        headers,
     )
     .await;
     let sid2 = view["session_id"].as_str().unwrap().to_string();
