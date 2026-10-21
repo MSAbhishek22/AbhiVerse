@@ -45,13 +45,23 @@ fn signed_at(id: &DeviceIdentity, message: &str, ts: i64) -> Vec<(String, String
     ]
 }
 
-async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity) {
+fn make_controller(tag: &str) -> DeviceIdentity {
+    let dir = std::env::temp_dir().join(format!(
+        "abhiverse-session-test-{tag}-ctrl-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    ensure_identity(&dir, "Pixel", DeviceKind::Controller).unwrap()
+}
+
+async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity, DeviceIdentity) {
     let dir = std::env::temp_dir().join(format!(
         "abhiverse-session-test-{tag}-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
     let agent = ensure_identity(&dir, "Laptop", DeviceKind::Agent).unwrap();
+    let controller = make_controller(tag);
     let app = abhiverse_api::build_app();
     let (_, created) = call(
         app.clone(),
@@ -67,7 +77,7 @@ async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity) {
         app.clone(),
         Method::POST,
         "/pairing/claim",
-        Some(json!({ "code": code, "controller_id": "ctrl-1", "controller_name": "Pixel" })),
+        Some(json!({ "code": code, "controller": controller.info })),
         vec![],
     )
     .await;
@@ -82,14 +92,29 @@ async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity) {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    (app, agent)
+    (app, agent, controller)
+}
+
+fn session_headers(
+    controller: &DeviceIdentity,
+    device_id: &str,
+    offer: &str,
+) -> Vec<(String, String)> {
+    let ts = now_unix();
+    let msg = abhiverse_protocol::session_create_message(
+        device_id,
+        &controller.info.device_id,
+        &sha256_hex(offer.as_bytes()),
+        ts,
+    );
+    signed_at(controller, &msg, ts)
 }
 
 const OFFER: &str = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\n";
 
 #[tokio::test]
 async fn full_signalling_flow() {
-    let (app, agent) = paired_app("flow").await;
+    let (app, agent, controller) = paired_app("flow").await;
     let dev = agent.info.device_id.clone();
 
     // RTC config defaults to STUN.
@@ -113,15 +138,15 @@ async fn full_signalling_flow() {
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 
-    // The paired controller can.
+    // The paired controller can — with its signature.
     let (s, view) = call(
         app.clone(),
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": "ctrl-1", "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER,
         })),
-        vec![],
+        session_headers(&controller, &dev, OFFER),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
@@ -180,7 +205,7 @@ async fn full_signalling_flow() {
 
     // ICE flows both ways; each side sees only the other's candidates.
     let (s, r) = call(app.clone(), Method::POST, &format!("/sessions/{sid}/ice"), Some(json!({
-        "from_id": "ctrl-1", "candidate": "candidate:ctrl", "sdp_mid": "0", "sdp_mline_index": 0,
+        "from_id": controller.info.device_id, "candidate": "candidate:ctrl", "sdp_mid": "0", "sdp_mline_index": 0,
     })), vec![]).await;
     assert_eq!(s, StatusCode::OK);
     let seq_ctrl = r["seq"].as_u64().unwrap();
@@ -211,7 +236,10 @@ async fn full_signalling_flow() {
     let (_, ice) = call(
         app.clone(),
         Method::GET,
-        &format!("/sessions/{sid}/ice?as=ctrl-1&after={seq_ctrl}"),
+        &format!(
+            "/sessions/{sid}/ice?as={}&after={seq_ctrl}",
+            controller.info.device_id
+        ),
         None,
         vec![],
     )
@@ -225,21 +253,21 @@ async fn full_signalling_flow() {
         app.clone(),
         Method::POST,
         &format!("/sessions/{sid}/end"),
-        Some(json!({ "from_id": "ctrl-1" })),
+        Some(json!({ "from_id": controller.info.device_id })),
         vec![],
     )
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(view["status"], "ended");
     let (s, _) = call(app.clone(), Method::POST, &format!("/sessions/{sid}/ice"), Some(json!({
-        "from_id": "ctrl-1", "candidate": "candidate:late", "sdp_mid": null, "sdp_mline_index": null,
+        "from_id": controller.info.device_id, "candidate": "candidate:late", "sdp_mid": null, "sdp_mline_index": null,
     })), vec![]).await;
     assert_eq!(s, StatusCode::CONFLICT);
 }
 
 #[tokio::test]
 async fn agent_can_reject_and_end_with_signature() {
-    let (app, agent) = paired_app("reject").await;
+    let (app, agent, controller) = paired_app("reject").await;
     let dev = agent.info.device_id.clone();
 
     let (_, view) = call(
@@ -247,9 +275,9 @@ async fn agent_can_reject_and_end_with_signature() {
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": "ctrl-1", "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER,
         })),
-        vec![],
+        session_headers(&controller, &dev, OFFER),
     )
     .await;
     let sid = view["session_id"].as_str().unwrap().to_string();
@@ -283,9 +311,9 @@ async fn agent_can_reject_and_end_with_signature() {
         Method::POST,
         "/sessions",
         Some(json!({
-            "device_id": dev, "controller_id": "ctrl-1", "sdp_offer": OFFER,
+            "device_id": dev, "controller_id": controller.info.device_id, "sdp_offer": OFFER,
         })),
-        vec![],
+        session_headers(&controller, &dev, OFFER),
     )
     .await;
     let sid2 = view["session_id"].as_str().unwrap().to_string();
