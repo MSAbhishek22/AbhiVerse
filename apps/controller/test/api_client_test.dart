@@ -77,4 +77,77 @@ void main() {
       throwsA(isA<AbhiverseApiException>()),
     );
   });
+  test('sendBytes hashes, chunks and completes a transfer', () async {
+    final paths = <String>[];
+    final mock = MockClient((request) async {
+      paths.add('${request.method} ${request.url.path}');
+      if (request.url.path == '/transfers') {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['file_name'], 'hello.txt');
+        expect(body['sha256'],
+            '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'); // sha256("hello")
+        expect(body['total_chunks'], 1);
+        return http.Response(
+          jsonEncode({
+            'transfer_id': 't1', 'from_id': body['from_id'], 'to_id': 'dev1',
+            'file_name': 'hello.txt', 'size_bytes': 5,
+            'sha256': body['sha256'], 'total_chunks': 1,
+            'received_chunks': <int>[], 'status': 'receiving',
+          }),
+          201,
+        );
+      }
+      if (request.url.path == '/transfers/t1/chunks/0') {
+        expect(request.bodyBytes, utf8.encode('hello'));
+        return http.Response('{"received":1,"total":1}', 200);
+      }
+      if (request.url.path == '/transfers/t1/complete') {
+        return http.Response(
+          jsonEncode({
+            'transfer_id': 't1', 'from_id': 'c', 'to_id': 'dev1',
+            'file_name': 'hello.txt', 'size_bytes': 5,
+            'sha256': '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+            'total_chunks': 1, 'received_chunks': [0], 'status': 'complete',
+          }),
+          200,
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final client = ApiClient(config: config, client: mock);
+    final view = await client.sendBytes(
+        toId: 'dev1', fileName: 'hello.txt', bytes: utf8.encode('hello'));
+    expect(view.status, 'complete');
+    expect(paths, [
+      'POST /transfers',
+      'PUT /transfers/t1/chunks/0',
+      'POST /transfers/t1/complete',
+    ]);
+  });
+
+  test('downloadBytes assembles chunks and verifies the hash', () async {
+    const view = TransferView(
+      transferId: 't9',
+      fromId: 'dev1',
+      toId: 'me',
+      fileName: 'hello.txt',
+      sizeBytes: 5,
+      sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+      totalChunks: 1,
+      receivedChunks: [0],
+      status: 'complete',
+    );
+    final mock = MockClient((request) async {
+      expect(request.url.path, '/transfers/t9/chunks/0');
+      return http.Response.bytes(utf8.encode('hello'), 200);
+    });
+    final client = ApiClient(config: config, client: mock);
+    final bytes = await client.downloadBytes(view);
+    expect(utf8.decode(bytes), 'hello');
+
+    final badMock = MockClient((_) async => http.Response.bytes(utf8.encode('HELLO'), 200));
+    final badClient = ApiClient(config: config, client: badMock);
+    expect(badClient.downloadBytes(view), throwsA(isA<AbhiverseApiException>()));
+  });
+
 }
