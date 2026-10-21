@@ -7,7 +7,7 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.5 — Tasks 001–006 + controller keys & persistence.**
+> **Status: v0.5.1 — Tasks 001–006 + controller keys, persistence & polish.**
 > Device identity (Ed25519) for agents *and* controllers, pairing
 > with signed approval (code or QR), presence, revocation signed by
 > either side, chunked file transfer with SHA-256 integrity and
