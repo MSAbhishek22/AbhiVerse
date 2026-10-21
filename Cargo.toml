@@ -2,12 +2,13 @@
 resolver = "2"
 members = [
     "crates/protocol",
+    "crates/identity",
     "server/api",
     "agents/windows",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/YOUR-USERNAME/abhiverse"
@@ -16,3 +17,6 @@ repository = "https://github.com/YOUR-USERNAME/abhiverse"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
