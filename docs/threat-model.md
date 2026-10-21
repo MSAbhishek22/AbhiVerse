@@ -27,16 +27,22 @@ it publicly.
   without the private key.
 - Pairing approval/rejection, heartbeats and revocation all require
   Ed25519 signatures from the device key; timestamps bound replay.
-- Agent private keys live in `keypair.json` with `0600` permissions
-  on Unix (Windows ACL hardening is still TODO).
+- Agent private keys live in `keypair.json`, protected with `0600`
+  permissions on Unix and a current-user-only DACL on Windows
+  (since v0.5.1; the agent fails closed if the ACL cannot be set).
+
+Assessed, not a gap: QR codes are not signed — deliberately. A QR
+only carries the 6-digit pairing code, which is single-use,
+expires in 5 minutes, and is worthless without the target device's
+signed approval at its own prompt; a swapped QR can at worst point
+a phone at a code whose pairing the laptop owner still has to
+approve, seeing the controller's name first.
 
 Closed in v0.5: controllers hold Ed25519 keys (device ID =
 fingerprint of the controller key, registered at pairing), so
 controller-originated transfers, session requests and
 controller-initiated revocation are all signature-verified; API
-state persists via `ABHIVERSE_STATE_FILE`. Remaining known gaps:
-the Windows keypair file relies on the user's profile ACLs
-(explicit ACL hardening still TODO), session/pairing state is
+state persists via `ABHIVERSE_STATE_FILE`. Remaining known gaps: session/pairing state is
 kept in memory by design (short-lived), and hosted deployment
 issues are tracked separately. Both were
 scheduled before any hosted/public deployment.
