@@ -163,8 +163,13 @@ Flutter and Windows agree without a translation table.
   (`crates/win-input`: web `KeyboardEvent.code` → virtual keys,
   normalised mouse → absolute pixels), gated behind the agent's
   `--allow-input` flag — without it, input events are only logged.
-- **006d (done in v0.5):** TURN deployment guide (`docs/turn.md`,
-  coturn + `ABHIVERSE_ICE_SERVERS_JSON`), persistent "REMOTE
-  SESSION ACTIVE" banner in the agent console for the whole
-  session. Still open: adaptive quality (bitrate/resolution by
-  network stats) and a tray-level indicator.
+- **006d (done; TURN guide v0.5, the rest v0.5.1):** TURN
+  deployment guide (`docs/turn.md`) incl. API-minted short-lived
+  credentials; persistent "REMOTE SESSION ACTIVE" banner in the
+  agent console for the whole session; Windows console-title
+  warning + toast notification at session start/end
+  (`crates/win-input` indicator); adaptive quality — the agent
+  watches WebRTC stats (packet loss, estimated available bitrate)
+  and steps the stream between 640×360@10fps/1.2 Mbps,
+  640×360@5fps/700 kbps and 480×270@5fps/350 kbps with
+  hysteresis.
