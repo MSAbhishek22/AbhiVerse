@@ -7,19 +7,20 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.1 — Task 001 foundation.** This release proves local
-> communication between the Flutter controller, the Rust coordination
-> API and the Rust device agent. Pairing, file transfer and remote
-> desktop are *not* implemented yet — see the roadmap below.
+> **Status: v0.2 — Tasks 001–004.** Local foundation plus device
+> identity (Ed25519 keys), pairing with signed approval, presence
+> heartbeats and revocation. File transfer and remote desktop are
+> *not* implemented yet — see the roadmap below.
 
 ## What exists today
 
 | Component | Path | State |
 |---|---|---|
-| Coordination API (Rust + Axum) | `server/api` | `GET /health` only, binds to localhost |
-| Windows agent (Rust) | `agents/windows` | Reports version/platform, clean Ctrl+C shutdown. No device capabilities yet |
-| Android controller (Flutter) | `apps/controller` | Home screen showing live connection status + backend version, with error/retry |
-| Shared protocol types | `crates/protocol` | `HealthResponse`, `AgentInfo`, protocol v1 |
+| Coordination API (Rust + Axum) | `server/api` | Health, pairing, presence and revocation endpoints; binds to localhost; in-memory state |
+| Windows agent (Rust) | `agents/windows` | Device identity, `--pair` flow with on-device approval, signed heartbeats, `--revoke`. No device capabilities yet |
+| Android controller (Flutter) | `apps/controller` | Connection status, paired-device list with online presence, pairing by 6-digit code |
+| Shared protocol types | `crates/protocol` | Health, device, pairing and presence payloads, protocol v1 |
+| Device identity (Rust) | `crates/identity` | Ed25519 key generation/storage (0600), fingerprint device IDs, sign/verify |
 
 ## Prerequisites
 
@@ -47,7 +48,7 @@ flutter doctor
 cargo run -p abhiverse-api
 # listening on http://127.0.0.1:8080
 curl http://127.0.0.1:8080/health
-# {"app":"ABHIVERSE","service":"abhiverse-api","status":"ok","version":"0.1.0","protocol_version":1}
+# {"app":"ABHIVERSE","service":"abhiverse-api","status":"ok","version":"0.2.0","protocol_version":1}
 ```
 
 Override the bind address with `ABHIVERSE_BIND_ADDR`, e.g.
@@ -57,10 +58,22 @@ Override the bind address with `ABHIVERSE_BIND_ADDR`, e.g.
 ### 2. Device agent
 
 ```sh
-cargo run -p abhiverse-agent-windows -- --version   # abhiverse-agent 0.1.0
-cargo run -p abhiverse-agent-windows -- --once      # JSON status line
-cargo run -p abhiverse-agent-windows                # runs until Ctrl+C
+cargo run -p abhiverse-agent-windows -- --version   # abhiverse-agent 0.2.0
+cargo run -p abhiverse-agent-windows -- --identity  # device ID + public identity
+cargo run -p abhiverse-agent-windows -- --pair --api http://127.0.0.1:8080
+cargo run -p abhiverse-agent-windows                # runs until Ctrl+C (heartbeats if paired)
+cargo run -p abhiverse-agent-windows -- --revoke    # unpair/revoke this device
 ```
+
+On first run the agent creates an Ed25519 key pair in its data
+directory (`ABHIVERSE_DATA_DIR`, default `~/.abhiverse/agent`). The
+device ID is the fingerprint of the public key. **Back up / protect
+`keypair.json` like a password — it *is* the device's identity.**
+
+To pair: start the API, run the agent with `--pair`, then enter the
+6-digit code in the controller app and approve the prompt on the
+computer. The code expires in 5 minutes, is single-use, and the
+approval is a signature from the agent's private key.
 
 The agent builds and runs on Windows, Linux and macOS today;
 Windows-specific capabilities arrive in later phases behind
@@ -99,13 +112,14 @@ flutter analyze
 flutter test
 ```
 
-Verified for Task 001 (Linux dev host, Rust 1.99, Flutter 3.47):
-Rust — 5 tests passing, clippy + rustfmt clean, `GET /health`
-returns the documented JSON live, agent and API both exit cleanly
-on Ctrl+C. Flutter — `flutter analyze` clean, 5 tests passing, and
-a live integration check passed with the Flutter client talking to
-the real Rust API on `127.0.0.1:8080`. Android APK builds require
-the Android SDK (`flutter doctor`) on your machine.
+Verified for v0.2 (Linux dev host, Rust 1.99, Flutter 3.47):
+Rust — 12 tests passing, clippy + rustfmt clean. Flutter —
+`flutter analyze` clean, 8 tests passing. Live end-to-end on
+`127.0.0.1:8080`: agent generated a pairing code, a controller
+claimed it, approval was confirmed at the agent prompt, the device
+appeared in the Flutter app's device list, heartbeats brought it
+online, and `--revoke` removed it and blocked further heartbeats.
+Android APK builds require the Android SDK (`flutter doctor`).
 
 ## Repository layout
 
@@ -122,9 +136,9 @@ abhiverse/
 ## Roadmap
 
 - **Task 001 — Foundation** ✅ local health check + builds
-- **Task 002** — Device identity & key generation
-- **Task 003** — Pairing challenges, QR codes, target-device approval
-- **Task 004** — Authenticated presence & revocation
+- **Task 002** — Device identity & key generation ✅
+- **Task 003** — Pairing challenges & target-device approval ✅ (QR payload is the same code; in-app QR scanning is a later UX add)
+- **Task 004** — Authenticated presence & revocation ✅
 - **Task 005** — Secure file transfer (integrity + resume)
 - **Task 006** — Remote desktop engine & input
 
