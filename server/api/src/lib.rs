@@ -930,7 +930,55 @@ async fn rtc_config() -> Json<RtcConfig> {
             });
         }
     }
+    // Ephemeral TURN credentials (coturn `--use-auth-secret`): when a
+    // shared secret and TURN urls are configured, mint a credential
+    // that lives for TURN_CREDENTIAL_TTL_SECS instead of shipping a
+    // static password to every client. The username IS the expiry.
+    if let (Ok(secret), Ok(urls_raw)) = (
+        std::env::var("ABHIVERSE_TURN_SECRET"),
+        std::env::var("ABHIVERSE_TURN_URLS"),
+    ) {
+        let urls: Vec<String> = urls_raw
+            .split(',')
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect();
+        if !secret.is_empty() && !urls.is_empty() {
+            let mut servers = RtcConfig::default_stun().ice_servers;
+            servers.push(mint_turn_server(&secret, urls, now_unix()));
+            return Json(RtcConfig {
+                ice_servers: servers,
+            });
+        }
+    }
     Json(RtcConfig::default_stun())
+}
+
+const TURN_CREDENTIAL_TTL_SECS: i64 = 3600;
+
+/// coturn `--use-auth-secret` credential: base64(HMAC-SHA1(secret,
+/// username)) where username is the expiry unix timestamp.
+fn mint_turn_credential(secret: &str, username: &str) -> String {
+    use base64::Engine as _;
+    use hmac::digest::KeyInit as _;
+    use hmac::Mac as _;
+    let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(username.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+}
+
+fn mint_turn_server(
+    secret: &str,
+    urls: Vec<String>,
+    now: i64,
+) -> abhiverse_protocol::IceServerConfig {
+    let username = (now + TURN_CREDENTIAL_TTL_SECS).to_string();
+    abhiverse_protocol::IceServerConfig {
+        credential: Some(mint_turn_credential(secret, &username)),
+        urls,
+        username: Some(username),
+    }
 }
 
 fn rd_view(id: &str, rec: &RdSession) -> SessionView {
