@@ -1,0 +1,18 @@
+[package]
+name = "abhiverse-agent-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ABHIVERSE device agent for Windows (Task 001: version + clean shutdown)"
+
+[[bin]]
+name = "abhiverse-agent"
+path = "src/main.rs"
+
+[dependencies]
+abhiverse-protocol = { path = "../../crates/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
