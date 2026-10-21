@@ -36,6 +36,7 @@ use axum::{
     Json, Router,
 };
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 const PAIRING_TTL_SECS: i64 = 300;
 const ONLINE_WINDOW_SECS: i64 = 30;
@@ -46,8 +47,7 @@ struct Session {
     pairing_id: String,
     code: String,
     agent: DeviceInfo,
-    controller_id: Option<String>,
-    controller_name: Option<String>,
+    controller: Option<DeviceInfo>,
     status: PairingStatus,
     expires_at: i64,
 }
@@ -57,6 +57,9 @@ struct TrustedDevice {
     info: DeviceInfo,
     paired_with_name: String,
     controller_id: String,
+    /// The paired controller's public identity (Task 007): its key
+    /// verifies controller-originated requests.
+    controller_info: DeviceInfo,
     last_seen: Option<i64>,
     revoked: bool,
 }
@@ -80,6 +83,144 @@ struct Store {
     devices: HashMap<String, TrustedDevice>,
     transfers: HashMap<String, TransferRec>,
     rd_sessions: HashMap<String, RdSession>,
+    /// When set, mutations snapshot the store to this JSON file.
+    persist_path: Option<PathBuf>,
+}
+
+// ---- Persistence (Task 008) ----
+// Pairings and transfers survive API restarts when ABHIVERSE_STATE_FILE
+// points at a JSON snapshot. Pairing *sessions* and remote-desktop
+// sessions stay ephemeral on purpose (short-lived by design).
+
+#[derive(Serialize, Deserialize)]
+struct PersistedDevice {
+    info: DeviceInfo,
+    paired_with_name: String,
+    controller_id: String,
+    controller_info: DeviceInfo,
+    last_seen: Option<i64>,
+    revoked: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedTransfer {
+    from_id: String,
+    to_id: String,
+    file_name: String,
+    size_bytes: u64,
+    sha256: String,
+    total_chunks: u32,
+    received: Vec<u32>,
+    status: TransferStatus,
+    from_is_agent: bool,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct Snapshot {
+    devices: Vec<PersistedDevice>,
+    transfers: HashMap<String, PersistedTransfer>,
+}
+
+impl Store {
+    /// Snapshot to the persist path, if one is configured.
+    fn persist(&self) {
+        if let Some(path) = &self.persist_path {
+            self.save(path);
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            devices: self
+                .devices
+                .values()
+                .map(|d| PersistedDevice {
+                    info: d.info.clone(),
+                    paired_with_name: d.paired_with_name.clone(),
+                    controller_id: d.controller_id.clone(),
+                    controller_info: d.controller_info.clone(),
+                    last_seen: d.last_seen,
+                    revoked: d.revoked,
+                })
+                .collect(),
+            transfers: self
+                .transfers
+                .iter()
+                .map(|(id, r)| {
+                    (
+                        id.clone(),
+                        PersistedTransfer {
+                            from_id: r.from_id.clone(),
+                            to_id: r.to_id.clone(),
+                            file_name: r.file_name.clone(),
+                            size_bytes: r.size_bytes,
+                            sha256: r.sha256.clone(),
+                            total_chunks: r.total_chunks,
+                            received: r.received.iter().copied().collect(),
+                            status: r.status,
+                            from_is_agent: r.from_is_agent,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        let Ok(json) = serde_json::to_string(&self.snapshot()) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+
+    fn load(path: &std::path::Path) -> Store {
+        let mut store = Store {
+            persist_path: Some(path.to_path_buf()),
+            ..Store::default()
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return store;
+        };
+        let Ok(snap) = serde_json::from_str::<Snapshot>(&text) else {
+            return store;
+        };
+        for d in snap.devices {
+            store.devices.insert(
+                d.info.device_id.clone(),
+                TrustedDevice {
+                    info: d.info,
+                    paired_with_name: d.paired_with_name,
+                    controller_id: d.controller_id,
+                    controller_info: d.controller_info,
+                    last_seen: d.last_seen,
+                    revoked: d.revoked,
+                },
+            );
+        }
+        for (id, r) in snap.transfers {
+            store.transfers.insert(
+                id,
+                TransferRec {
+                    from_id: r.from_id,
+                    to_id: r.to_id,
+                    file_name: r.file_name,
+                    size_bytes: r.size_bytes,
+                    sha256: r.sha256,
+                    total_chunks: r.total_chunks,
+                    received: r.received.into_iter().collect(),
+                    status: r.status,
+                    from_is_agent: r.from_is_agent,
+                },
+            );
+        }
+        store
+    }
 }
 
 #[derive(Clone)]
@@ -112,9 +253,23 @@ fn transfer_dir() -> PathBuf {
 /// Build the HTTP router (fresh in-memory state). Extracted from
 /// `main` so integration tests can exercise it without a socket.
 pub fn build_app() -> Router {
+    let state_file = std::env::var("ABHIVERSE_STATE_FILE")
+        .ok()
+        .map(PathBuf::from);
+    build_app_with_paths(state_file, transfer_dir())
+}
+
+/// Build the router with explicit storage paths (used by tests and
+/// by `build_app`, which reads `ABHIVERSE_STATE_FILE` /
+/// `ABHIVERSE_TRANSFER_DIR`).
+pub fn build_app_with_paths(state_file: Option<PathBuf>, chunk_dir: PathBuf) -> Router {
+    let mut initial = state_file.as_deref().map(Store::load).unwrap_or_default();
+    if initial.persist_path.is_none() {
+        initial.persist_path = state_file.clone();
+    }
     let store: Shared = Arc::new(AppState {
-        store: Mutex::new(Store::default()),
-        chunk_dir: transfer_dir(),
+        store: Mutex::new(initial),
+        chunk_dir,
     });
     Router::new()
         .route("/health", get(health))
@@ -164,13 +319,20 @@ fn refresh_expiry(session: &mut Session) {
     }
 }
 
+fn session_controller(store: &Store, pairing_id: &str) -> Option<DeviceInfo> {
+    store
+        .sessions
+        .get(pairing_id)
+        .and_then(|s| s.controller.clone())
+}
+
 fn session_view(session: &Session) -> PairingView {
     PairingView {
         pairing_id: session.pairing_id.clone(),
         status: session.status,
         agent: session.agent.clone(),
-        controller_id: session.controller_id.clone(),
-        controller_name: session.controller_name.clone(),
+        controller_id: session.controller.as_ref().map(|c| c.device_id.clone()),
+        controller_name: session.controller.as_ref().map(|c| c.name.clone()),
         expires_at: session.expires_at,
     }
 }
@@ -204,8 +366,7 @@ async fn create_pairing(
         pairing_id: pairing_id.clone(),
         code: code.clone(),
         agent: req.agent,
-        controller_id: None,
-        controller_name: None,
+        controller: None,
         status: PairingStatus::Pending,
         expires_at,
     };
@@ -250,9 +411,14 @@ async fn claim_pairing(
     let Some(id) = found else {
         return err(StatusCode::NOT_FOUND, "unknown or expired pairing code");
     };
+    if !valid_device_info(&req.controller) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "controller device_id does not match its public key fingerprint",
+        );
+    }
     let session = store.sessions.get_mut(&id).unwrap();
-    session.controller_id = Some(req.controller_id);
-    session.controller_name = Some(req.controller_name);
+    session.controller = Some(req.controller);
     session.status = PairingStatus::Claimed;
     Json(session_view(session)).into_response()
 }
@@ -296,14 +462,19 @@ fn decide(store: &Shared, id: &str, signature: &str, approve: bool) -> Response 
     };
     let view = session_view(session);
     if approve {
+        let Some(controller_info) = session_controller(&store, &view.pairing_id) else {
+            return err(StatusCode::CONFLICT, "pairing has no controller identity");
+        };
         let device = TrustedDevice {
             info: view.agent.clone(),
             paired_with_name: view.controller_name.clone().unwrap_or_default(),
             controller_id: view.controller_id.clone().unwrap_or_default(),
+            controller_info,
             last_seen: None,
             revoked: false,
         };
         store.devices.insert(device.info.device_id.clone(), device);
+        store.persist();
     }
     Json(view).into_response()
 }
@@ -395,10 +566,14 @@ async fn revoke_device(
         );
     }
     let message = abhiverse_protocol::revoke_message(&id, req.timestamp);
-    if !verify(&device.info.public_key, &message, &req.signature) {
+    // Either the device itself, or its paired controller, may revoke.
+    let by_device = verify(&device.info.public_key, &message, &req.signature);
+    let by_controller =
+        !by_device && verify(&device.controller_info.public_key, &message, &req.signature);
+    if !by_device && !by_controller {
         return err(
             StatusCode::UNAUTHORIZED,
-            "signature does not match device key",
+            "signature does not match device or paired controller key",
         );
     }
     device.revoked = true;
@@ -481,27 +656,41 @@ async fn create_transfer(
         return err(StatusCode::BAD_REQUEST, "sha256 must be 64 hex characters");
     }
     let store = state.store.lock().unwrap();
-    // Sender classification: a paired agent, or the paired controller
-    // of the target agent.
+    // Sender classification: a paired agent (sending to its paired
+    // controller), or the paired controller of the target agent.
+    // Both must sign the create request with their device key.
     let from_is_agent = store.devices.get(&req.from_id).is_some_and(|d| !d.revoked);
+    let ts = header(&headers, "x-abhiverse-timestamp")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let message = transfer_create_message(&req.from_id, &req.to_id, &req.sha256, ts);
     if from_is_agent {
         let device = store.devices.get(&req.from_id).unwrap();
-        let ts = header(&headers, "x-abhiverse-timestamp")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        let message = transfer_create_message(&req.from_id, &req.to_id, &req.sha256, ts);
+        if device.controller_id != req.to_id {
+            return err(
+                StatusCode::FORBIDDEN,
+                "agents can only send to their paired controller",
+            );
+        }
         if let Some(resp) = signature_error(&headers, &device.info.public_key, &message) {
             return resp;
         }
     } else {
-        let is_paired_controller = store.devices.get(&req.to_id).is_some_and(|d| {
-            !d.revoked && d.controller_id == req.from_id && !req.from_id.is_empty()
-        });
-        if !is_paired_controller {
+        let Some(target) = store.devices.get(&req.to_id) else {
             return err(
                 StatusCode::FORBIDDEN,
                 "sender is not a paired device or its controller",
             );
+        };
+        if target.revoked || target.controller_info.device_id != req.from_id {
+            return err(
+                StatusCode::FORBIDDEN,
+                "sender is not the paired controller of the target",
+            );
+        }
+        let pk = target.controller_info.public_key.clone();
+        if let Some(resp) = signature_error(&headers, &pk, &message) {
+            return resp;
         }
     }
     drop(store);
@@ -520,12 +709,11 @@ async fn create_transfer(
         from_is_agent,
     };
     let view = transfer_view(&transfer_id, &rec);
-    state
-        .store
-        .lock()
-        .unwrap()
-        .transfers
-        .insert(transfer_id, rec);
+    {
+        let mut store = state.store.lock().unwrap();
+        store.transfers.insert(transfer_id, rec);
+        store.persist();
+    }
     (StatusCode::CREATED, Json(view)).into_response()
 }
 
@@ -603,10 +791,13 @@ async fn upload_chunk(
         );
     }
     let mut store = state.store.lock().unwrap();
-    let rec = store.transfers.get_mut(&id).unwrap();
-    rec.received.insert(index);
-    Json(serde_json::json!({ "received": rec.received.len(), "total": rec.total_chunks }))
-        .into_response()
+    let (received, total) = {
+        let rec = store.transfers.get_mut(&id).unwrap();
+        rec.received.insert(index);
+        (rec.received.len(), rec.total_chunks)
+    };
+    store.persist();
+    Json(serde_json::json!({ "received": received, "total": total })).into_response()
 }
 
 async fn download_chunk(
@@ -706,16 +897,23 @@ async fn complete_transfer(
         }
     };
     let mut store = state.store.lock().unwrap();
-    let rec_mut = store.transfers.get_mut(&id).unwrap();
-    if actual == rec.sha256 {
-        rec_mut.status = TransferStatus::Complete;
-        Json(transfer_view(&id, rec_mut)).into_response()
-    } else {
-        rec_mut.status = TransferStatus::Failed;
-        err(
+    let view = {
+        let rec_mut = store.transfers.get_mut(&id).unwrap();
+        if actual == rec.sha256 {
+            rec_mut.status = TransferStatus::Complete;
+            Some(transfer_view(&id, rec_mut))
+        } else {
+            rec_mut.status = TransferStatus::Failed;
+            None
+        }
+    };
+    store.persist();
+    match view {
+        Some(view) => Json(view).into_response(),
+        None => err(
             StatusCode::UNPROCESSABLE_ENTITY,
             "assembled file hash does not match declared sha256",
-        )
+        ),
     }
 }
 
@@ -756,6 +954,7 @@ fn refresh_rd_expiry(rec: &mut RdSession) {
 
 async fn create_session(
     State(state): State<Shared>,
+    headers: HeaderMap,
     Json(req): Json<CreateSessionRequest>,
 ) -> Response {
     if req.sdp_offer.is_empty() || req.sdp_offer.len() > 100_000 {
@@ -763,14 +962,32 @@ async fn create_session(
     }
     {
         let store = state.store.lock().unwrap();
-        let allowed = store.devices.get(&req.device_id).is_some_and(|d| {
-            !d.revoked && d.controller_id == req.controller_id && !req.controller_id.is_empty()
-        });
-        if !allowed {
+        let Some(device) = store.devices.get(&req.device_id) else {
             return err(
                 StatusCode::FORBIDDEN,
                 "only the paired controller can request a session",
             );
+        };
+        if device.revoked || device.controller_info.device_id != req.controller_id {
+            return err(
+                StatusCode::FORBIDDEN,
+                "only the paired controller can request a session",
+            );
+        }
+        // The controller signs its session request (Task 007).
+        let offer_hash = abhiverse_file_transfer::sha256_hex(req.sdp_offer.as_bytes());
+        let ts = header(&headers, "x-abhiverse-timestamp")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        let message = abhiverse_protocol::session_create_message(
+            &req.device_id,
+            &req.controller_id,
+            &offer_hash,
+            ts,
+        );
+        let pk = device.controller_info.public_key.clone();
+        if let Some(resp) = signature_error(&headers, &pk, &message) {
+            return resp;
         }
     }
     let mut rng = rand::thread_rng();
