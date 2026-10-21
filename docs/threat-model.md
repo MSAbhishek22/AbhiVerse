@@ -62,3 +62,38 @@ scheduled before any hosted/public deployment.
   transfer creates; chunk integrity additionally rests on the
   declared whole-file SHA-256, verified by the API at completion
   and again by the receiver).
+
+## v0.5.2 security review (2026-10-21)
+
+A focused review of the authorisation boundaries, with automated
+regression tests in `server/api/tests/security.rs`:
+
+- **Replay (fixed).** Signed requests were previously accepted any
+  number of times inside the 120 s timestamp window. The API now
+  records accepted signatures and rejects repeats; create requests
+  additionally carry a signed `request_id` (protocol v2) so
+  legitimate duplicates are not mistaken for replays.
+- **Revocation vs. live sessions (fixed).** Revoking a device did
+  not touch its active remote-desktop sessions. Revocation now
+  ends them; the agent sees `Ended` on its next poll (≤ ~1 s) and
+  stops streaming and injecting, and closed sessions refuse new
+  ICE. Input injection also stops with the peer connection.
+- **Pairing-code guessing (mitigated).** Failed claims are
+  throttled globally (10 failures/minute locks claiming briefly).
+  A claimed code still needs the device's signed approval, and a
+  claim squats the code only until the 5-minute expiry.
+- **Transfer size (bounded).** Creates above a size cap (default
+  1 GiB, `ABHIVERSE_MAX_TRANSFER_MB`) are refused, bounding relay
+  disk use. Chunk indexes and lengths were already strictly
+  checked; file names are reduced to safe base names.
+- **Checked, no change needed.** Session/ICE endpoints verify
+  participation; cross-pairing requests (controller A → device B)
+  are refused (tested); revocation persists across API restarts
+  (tested); TURN credentials are minted per request with a
+  1-hour expiry and the secret never leaves the API; no private
+  keys or secrets are written to logs.
+- **Residual.** Controller-origin chunk uploads are unsigned by
+  design — integrity rests on the declared whole-file SHA-256,
+  verified at completion and again by the receiver. Session
+  offers expire after 120 s; established sessions end only via
+  end/revoke/peer-close, which matches the revocation test above.
