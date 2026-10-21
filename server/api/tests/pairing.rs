@@ -38,11 +38,22 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("abhiverse-api-test-{tag}-{}", std::process::id()))
 }
 
+fn other_controller_info() -> abhiverse_protocol::DeviceInfo {
+    make_controller("flow-ctrl2", "Other").info
+}
+
+fn make_controller(tag: &str, name: &str) -> abhiverse_identity::DeviceIdentity {
+    let dir = temp_dir(tag);
+    let _ = std::fs::remove_dir_all(&dir);
+    ensure_identity(&dir, name, DeviceKind::Controller).unwrap()
+}
+
 #[tokio::test]
 async fn full_pairing_presence_revocation_flow() {
     let dir = temp_dir("flow");
     let _ = std::fs::remove_dir_all(&dir);
     let agent = ensure_identity(&dir, "Test Laptop", DeviceKind::Agent).unwrap();
+    let controller = make_controller("flow-ctrl", "Pixel");
     let info = agent.info.clone();
     let app = abhiverse_api::build_app();
 
@@ -64,7 +75,7 @@ async fn full_pairing_presence_revocation_flow() {
         app.clone(),
         Method::POST,
         "/pairing/claim",
-        Some(json!({ "code": "999999", "controller_id": "c1", "controller_name": "Pixel" })),
+        Some(json!({ "code": "999999", "controller": controller.info })),
     )
     .await;
     // 999999 could theoretically be the generated code; regenerate check:
@@ -77,7 +88,7 @@ async fn full_pairing_presence_revocation_flow() {
         app.clone(),
         Method::POST,
         "/pairing/claim",
-        Some(json!({ "code": code, "controller_id": "c1", "controller_name": "Pixel" })),
+        Some(json!({ "code": code, "controller": controller.info })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -89,7 +100,7 @@ async fn full_pairing_presence_revocation_flow() {
         app.clone(),
         Method::POST,
         "/pairing/claim",
-        Some(json!({ "code": code, "controller_id": "c2", "controller_name": "Other" })),
+        Some(json!({ "code": code, "controller": other_controller_info() })),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -224,7 +235,9 @@ async fn reject_flow_leaves_no_trusted_device() {
         app.clone(),
         Method::POST,
         "/pairing/claim",
-        Some(json!({ "code": code, "controller_id": "c9", "controller_name": "Stranger" })),
+        Some(
+            json!({ "code": code, "controller": make_controller("reject-ctrl", "Stranger").info }),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -242,6 +255,69 @@ async fn reject_flow_leaves_no_trusted_device() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["status"], "rejected");
     let (_, list) = call(app, Method::GET, "/devices", None).await;
+    assert_eq!(list["devices"].as_array().unwrap().len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn paired_controller_can_revoke_the_device() {
+    let dir = temp_dir("ctrl-revoke");
+    let _ = std::fs::remove_dir_all(&dir);
+    let agent = ensure_identity(&dir, "Laptop", DeviceKind::Agent).unwrap();
+    let controller = make_controller("ctrl-revoke-c", "Pixel");
+    let app = abhiverse_api::build_app();
+    let (_, created) = call(
+        app.clone(),
+        Method::POST,
+        "/pairing/requests",
+        Some(json!({ "agent": agent.info })),
+    )
+    .await;
+    let pairing_id = created["pairing_id"].as_str().unwrap().to_string();
+    let code = created["code"].as_str().unwrap().to_string();
+    let (s, _) = call(
+        app.clone(),
+        Method::POST,
+        "/pairing/claim",
+        Some(json!({ "code": code, "controller": controller.info })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let sig = agent.sign(&pairing_approve_message(&pairing_id, &code));
+    let (s, _) = call(
+        app.clone(),
+        Method::POST,
+        &format!("/pairing/{pairing_id}/approve"),
+        Some(json!({ "signature": sig })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // A random key cannot revoke.
+    let stranger = make_controller("ctrl-revoke-s", "Mallory");
+    let ts = now_unix();
+    let bad = stranger.sign(&revoke_message(&agent.info.device_id, ts));
+    let (s, _) = call(
+        app.clone(),
+        Method::DELETE,
+        &format!("/devices/{}", agent.info.device_id),
+        Some(json!({ "timestamp": ts, "signature": bad })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // The paired controller can.
+    let ts = now_unix();
+    let sig = controller.sign(&revoke_message(&agent.info.device_id, ts));
+    let (s, _) = call(
+        app.clone(),
+        Method::DELETE,
+        &format!("/devices/{}", agent.info.device_id),
+        Some(json!({ "timestamp": ts, "signature": sig })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, list) = call(app.clone(), Method::GET, "/devices", None).await;
     assert_eq!(list["devices"].as_array().unwrap().len(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
