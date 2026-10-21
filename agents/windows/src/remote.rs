@@ -295,6 +295,7 @@ async fn handle_session(
     // The OpenH264 encoder is not Send, so video runs on a
     // dedicated thread with a stop flag.
     let video_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let quality = Arc::new(std::sync::Mutex::new(QualityTier::High));
     if session.sdp_offer.contains("m=video") {
         let track = Arc::new(TrackLocalStaticSample::new(
             webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability {
@@ -316,6 +317,7 @@ async fn handle_session(
             Ok(_) => {
                 println!("Video track attached (H.264).");
                 let stop = Arc::clone(&video_stop);
+                let tier = Arc::clone(&quality);
                 std::thread::spawn(move || {
                     let rt = match tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -327,7 +329,7 @@ async fn handle_session(
                             return;
                         }
                     };
-                    rt.block_on(video_loop(track, stop));
+                    rt.block_on(video_loop(track, stop, tier));
                 });
             }
             Err(e) => {
@@ -366,11 +368,44 @@ async fn handle_session(
     );
     println!("  Keep this window open; closing it ends remote access.");
     println!("============================================================");
+    abhiverse_win_input::indicator::session_started(&session.controller_id);
 
     // Remote ICE polling + remote end detection.
     let last_seq = Arc::new(AtomicU64::new(0));
+    let mut polls: u64 = 0;
     while !done.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(700)).await;
+        polls += 1;
+        // Adaptive quality (006d): every ~3 s, read the WebRTC stats
+        // and let pick_tier move the stream down/up a tier.
+        if polls.is_multiple_of(4) {
+            let stats = pc.get_stats().await;
+            let mut fraction_lost = 0.0f64;
+            let mut available_bps = 0.0f64;
+            for report in stats.reports.values() {
+                match report {
+                    webrtc::stats::StatsReportType::RemoteInboundRTP(r) => {
+                        fraction_lost = fraction_lost.max(r.fraction_lost);
+                    }
+                    webrtc::stats::StatsReportType::CandidatePair(c) => {
+                        available_bps = available_bps.max(c.available_outgoing_bitrate);
+                    }
+                    _ => {}
+                }
+            }
+            let mut current = quality.lock().unwrap();
+            let next = pick_tier(*current, fraction_lost, available_bps);
+            if next != *current {
+                println!(
+                    "video quality: {:?} -> {:?} (loss {:.1}%, est. {:.0} kbps available)",
+                    *current,
+                    next,
+                    fraction_lost * 100.0,
+                    available_bps / 1000.0
+                );
+                *current = next;
+            }
+        }
         let after = last_seq.load(Ordering::Relaxed);
         if let Ok(list) = sig
             .get_json::<IceCandidateListResponse>(&format!(
@@ -409,6 +444,7 @@ async fn handle_session(
     println!("============================================================");
     println!("  REMOTE SESSION ENDED ({session_id}).");
     println!("============================================================");
+    abhiverse_win_input::indicator::session_ended();
     Ok(())
 }
 
@@ -443,30 +479,71 @@ fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
     units.into_iter().filter(|u| !u.is_empty()).collect()
 }
 
+/// Adaptive stream quality. Downgrades react fast (packet loss or
+/// an estimated available bitrate below the current target);
+/// upgrades need a clean channel and clear headroom, so the stream
+/// does not oscillate on a borderline link.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum QualityTier {
+    High,
+    Medium,
+    Low,
+}
+
+impl QualityTier {
+    /// (width, height, fps, bitrate bps)
+    fn params(self) -> (u32, u32, u32, u32) {
+        match self {
+            QualityTier::High => (640, 360, 10, 1_200_000),
+            QualityTier::Medium => (640, 360, 5, 700_000),
+            QualityTier::Low => (480, 270, 5, 350_000),
+        }
+    }
+    fn down(self) -> QualityTier {
+        match self {
+            QualityTier::High => QualityTier::Medium,
+            QualityTier::Medium | QualityTier::Low => QualityTier::Low,
+        }
+    }
+    fn up(self) -> QualityTier {
+        match self {
+            QualityTier::Low => QualityTier::Medium,
+            QualityTier::Medium | QualityTier::High => QualityTier::High,
+        }
+    }
+}
+
+fn pick_tier(current: QualityTier, fraction_lost: f64, available_bps: f64) -> QualityTier {
+    let (_, _, _, bitrate) = current.params();
+    if fraction_lost > 0.08 || (available_bps > 0.0 && available_bps < bitrate as f64 * 0.7) {
+        return current.down();
+    }
+    if fraction_lost < 0.01 && current != QualityTier::High {
+        let target = current.up();
+        if available_bps > target.params().3 as f64 * 1.6 {
+            return target;
+        }
+    }
+    current
+}
+
 /// Encode and send screen frames until aborted.
 ///
 /// Source priority: DXGI desktop duplication on Windows; the
 /// synthetic test pattern everywhere else (and as a fallback).
 /// The first real-hardware run happens on the user's machine —
 /// see docs/remote-desktop.md.
-async fn video_loop(track: Arc<TrackLocalStaticSample>, stop: Arc<std::sync::atomic::AtomicBool>) {
+async fn video_loop(
+    track: Arc<TrackLocalStaticSample>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    tier: Arc<std::sync::Mutex<QualityTier>>,
+) {
     use abhiverse_win_input::capture::{bgra_to_i420, test_pattern_frame, BgraFrame};
-    const WIDTH: u32 = 640;
-    const HEIGHT: u32 = 360;
-    const FRAME_MS: u64 = 100; // 10 fps
-    let config = openh264::encoder::EncoderConfig::new()
-        .set_bitrate_bps(1_200_000)
-        .max_frame_rate(10.0);
-    let mut encoder = match openh264::encoder::Encoder::with_api_config(
-        openh264::OpenH264API::from_source(),
-        config,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("video: OpenH264 encoder failed to start: {e}");
-            return;
-        }
-    };
+    let mut encoder: Option<openh264::encoder::Encoder> = None;
+    let mut encoder_params: Option<(u32, u32, u32)> = None; // (w, h, bitrate)
+    let mut width = 640u32;
+    let mut height = 360u32;
+    let mut frame_ms = 100u64;
     #[cfg(windows)]
     let mut capturer = abhiverse_win_input::capture::DxgiCapturer::new().ok();
     #[cfg(windows)]
@@ -476,28 +553,57 @@ async fn video_loop(track: Arc<TrackLocalStaticSample>, stop: Arc<std::sync::ato
         println!("video: DXGI unavailable — streaming test pattern");
     }
     let mut tick: u64 = 0;
-    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(FRAME_MS));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(frame_ms));
     loop {
         ticker.tick().await;
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         tick += 1;
+        // Adopt the latest quality tier (set by the stats watcher):
+        // recreate the encoder when resolution or bitrate change,
+        // and repace the frame ticker when the fps changes.
+        let (tw, th, fps, bitrate) = tier.lock().unwrap().params();
+        if encoder_params != Some((tw, th, bitrate)) {
+            let config = openh264::encoder::EncoderConfig::new()
+                .set_bitrate_bps(bitrate)
+                .max_frame_rate(fps as f32);
+            match openh264::encoder::Encoder::with_api_config(
+                openh264::OpenH264API::from_source(),
+                config,
+            ) {
+                Ok(e) => {
+                    encoder = Some(e);
+                    encoder_params = Some((tw, th, bitrate));
+                }
+                Err(e) => {
+                    eprintln!("video: OpenH264 encoder failed to start: {e}");
+                    return;
+                }
+            }
+        }
+        if tw != width || th != height || 1000 / fps as u64 != frame_ms {
+            width = tw;
+            height = th;
+            frame_ms = 1000 / fps as u64;
+            ticker = tokio::time::interval(std::time::Duration::from_millis(frame_ms));
+        }
         let frame: BgraFrame = {
             #[cfg(windows)]
             {
                 match capturer.as_mut().map(|c| c.capture(0)) {
-                    Some(Ok(Some(f))) => downscale_640x360(f),
-                    _ => test_pattern_frame(WIDTH, HEIGHT, tick),
+                    Some(Ok(Some(f))) => downscale(f, width, height),
+                    _ => test_pattern_frame(width, height, tick),
                 }
             }
             #[cfg(not(windows))]
             {
-                test_pattern_frame(WIDTH, HEIGHT, tick)
+                test_pattern_frame(width, height, tick)
             }
         };
         let i420 = bgra_to_i420(&frame);
-        let yuv = openh264::formats::YUVBuffer::from_vec(i420, WIDTH as usize, HEIGHT as usize);
+        let yuv = openh264::formats::YUVBuffer::from_vec(i420, width as usize, height as usize);
+        let encoder = encoder.as_mut().expect("encoder created above");
         let bitstream = match encoder.encode(&yuv) {
             Ok(b) => b,
             Err(e) => {
@@ -515,7 +621,7 @@ async fn video_loop(track: Arc<TrackLocalStaticSample>, stop: Arc<std::sync::ato
             let sample = Sample {
                 data: bytes::Bytes::copy_from_slice(nal),
                 duration: if i + 1 == count {
-                    std::time::Duration::from_millis(FRAME_MS)
+                    std::time::Duration::from_millis(frame_ms)
                 } else {
                     std::time::Duration::ZERO
                 },
@@ -531,12 +637,13 @@ async fn video_loop(track: Arc<TrackLocalStaticSample>, stop: Arc<std::sync::ato
 /// Nearest-neighbour downscale to the streaming size (capture
 /// frames arrive at native resolution).
 #[cfg(windows)]
-fn downscale_640x360(
+fn downscale(
     frame: abhiverse_win_input::capture::BgraFrame,
+    width: u32,
+    height: u32,
 ) -> abhiverse_win_input::capture::BgraFrame {
     use abhiverse_win_input::capture::BgraFrame;
-    const WIDTH: u32 = 640;
-    const HEIGHT: u32 = 360;
+    let (WIDTH, HEIGHT) = (width, height);
     if frame.width == WIDTH && frame.height == HEIGHT {
         return frame;
     }
@@ -559,6 +666,33 @@ fn downscale_640x360(
 
 #[cfg(test)]
 mod tests {
+    use super::QualityTier::{High, Low, Medium};
+    use super::{pick_tier, QualityTier};
+
+    #[test]
+    fn tier_downgrades_on_loss() {
+        assert_eq!(pick_tier(High, 0.20, 0.0), Medium);
+        assert_eq!(pick_tier(Medium, 0.20, 0.0), Low);
+        assert_eq!(pick_tier(Low, 0.50, 0.0), Low);
+    }
+
+    #[test]
+    fn tier_downgrades_when_bandwidth_starved() {
+        // High needs 1.2 Mbps; 500 kbps estimated -> down a tier.
+        assert_eq!(pick_tier(High, 0.0, 500_000.0), Medium);
+        // Unknown estimate (0) never downgrades on bandwidth alone.
+        assert_eq!(pick_tier(High, 0.0, 0.0), High);
+    }
+
+    #[test]
+    fn tier_upgrades_only_with_headroom() {
+        // Medium -> High needs > 1.6x of 1.2 Mbps and ~no loss.
+        assert_eq!(pick_tier(Medium, 0.0, 2_500_000.0), High);
+        assert_eq!(pick_tier(Medium, 0.0, 1_500_000.0), Medium);
+        assert_eq!(pick_tier(Medium, 0.05, 2_500_000.0), Medium);
+        let _ = QualityTier::High; // keep imports obviously used
+    }
+
     use super::split_annexb;
 
     #[test]
