@@ -209,6 +209,18 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Unique per-request ID covered by create signatures (v0.5.2):
+/// distinguishes a legitimate duplicate create from a replay.
+fn new_request_id(seed: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    abhiverse_file_transfer::sha256_hex(format!("{seed}:{}:{nanos}", std::process::id()).as_bytes())
+        [..32]
+        .to_string()
+}
+
 fn run_send_file(
     identity: &abhiverse_identity::DeviceIdentity,
     path: &str,
@@ -232,12 +244,14 @@ fn run_send_file(
         .ok_or("file path has no usable name")?
         .to_string();
 
+    let request_id = new_request_id(&identity.info.device_id);
     let ts = abhiverse_protocol::now_unix();
     let message = abhiverse_protocol::transfer_create_message(
         &identity.info.device_id,
         &record.controller_id,
         &sha,
         ts,
+        &request_id,
     );
     let view: abhiverse_protocol::TransferView = ureq::post(&format!("{api}/transfers"))
         .set("x-abhiverse-timestamp", &ts.to_string())
@@ -249,6 +263,7 @@ fn run_send_file(
             "size_bytes": size,
             "sha256": sha,
             "total_chunks": total,
+            "request_id": request_id,
         }))?
         .into_json()?;
     println!(
