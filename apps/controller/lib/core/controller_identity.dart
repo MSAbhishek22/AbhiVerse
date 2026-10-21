@@ -90,16 +90,28 @@ String transferCreateMessage({
   required String toId,
   required String sha256Hex,
   required int timestamp,
+  required String requestId,
 }) =>
-    'abhiverse-transfer-create:$fromId:$toId:$sha256Hex:$timestamp';
+    'abhiverse-transfer-create:$fromId:$toId:$sha256Hex:$timestamp:$requestId';
 
 String sessionCreateMessage({
   required String deviceId,
   required String controllerId,
   required String offerSha256Hex,
   required int timestamp,
+  required String requestId,
 }) =>
-    'abhiverse-session-create:$deviceId:$controllerId:$offerSha256Hex:$timestamp';
+    'abhiverse-session-create:$deviceId:$controllerId:$offerSha256Hex:$timestamp:$requestId';
+
+/// A fresh per-request ID (32 hex chars) covered by create-request
+/// signatures, so a duplicated create is distinguishable from a
+/// replayed one.
+String newRequestId() {
+  final rng = Random.secure();
+  return List<int>.generate(16, (_) => rng.nextInt(256))
+      .map((b) => b.toRadixString(16).padLeft(2, '0'))
+      .join();
+}
 
 String revokeMessage({required String deviceId, required int timestamp}) =>
     'abhiverse-revoke:$deviceId:$timestamp';
