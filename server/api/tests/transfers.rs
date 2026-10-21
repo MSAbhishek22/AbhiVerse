@@ -133,13 +133,27 @@ async fn paired_app(tag: &str) -> (axum::Router, DeviceIdentity, DeviceIdentity)
     (app, agent, controller)
 }
 
-fn ctrl_headers(controller: &DeviceIdentity, to: &str, sha: &str) -> Vec<(String, String)> {
+fn ctrl_headers(
+    controller: &DeviceIdentity,
+    to: &str,
+    sha: &str,
+) -> (Vec<(String, String)>, String) {
+    static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let request_id = format!("test-req-{n}");
     let ts = now_unix();
-    signed_at(
+    let headers = signed_at(
         controller,
-        &abhiverse_protocol::transfer_create_message(&controller.info.device_id, to, sha, ts),
+        &abhiverse_protocol::transfer_create_message(
+            &controller.info.device_id,
+            to,
+            sha,
+            ts,
+            &request_id,
+        ),
         ts,
-    )
+    );
+    (headers, request_id)
 }
 
 fn sample_data() -> Vec<u8> {
@@ -155,15 +169,16 @@ async fn controller_to_agent_with_resume_and_signed_download() {
     assert_eq!(total, 3);
 
     // Controller creates the transfer (paired controller of the agent).
+    let (ctrl_hdrs, ctrl_rid) = ctrl_headers(&controller, &agent.info.device_id, &hash);
     let (status, view) = call(
         app.clone(),
         Method::POST,
         "/transfers",
         Some(json!({
             "from_id": controller.info.device_id, "to_id": agent.info.device_id, "file_name": "notes.bin",
-            "size_bytes": data.len(), "sha256": hash, "total_chunks": total,
+            "size_bytes": data.len(), "sha256": hash, "total_chunks": total, "request_id": ctrl_rid,
         })),
-        ctrl_headers(&controller, &agent.info.device_id, &hash),
+        ctrl_hdrs,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -242,7 +257,7 @@ async fn agent_to_controller_requires_signatures() {
     let total = total_chunks(data.len() as u64);
     let body = json!({
         "from_id": agent.info.device_id, "to_id": controller.info.device_id, "file_name": "photo.bin",
-        "size_bytes": data.len(), "sha256": hash, "total_chunks": total,
+        "size_bytes": data.len(), "sha256": hash, "total_chunks": total, "request_id": "a2c-req-1",
     });
 
     // Unsigned create from an agent identity is refused.
@@ -259,7 +274,13 @@ async fn agent_to_controller_requires_signatures() {
     let ts = now_unix();
     let headers = signed_at(
         &agent,
-        &transfer_create_message(&agent.info.device_id, &controller.info.device_id, &hash, ts),
+        &transfer_create_message(
+            &agent.info.device_id,
+            &controller.info.device_id,
+            &hash,
+            ts,
+            "a2c-req-1",
+        ),
         ts,
     );
     let (status, view) = call(app.clone(), Method::POST, "/transfers", Some(body), headers).await;
@@ -344,7 +365,7 @@ async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
         "/transfers",
         Some(json!({
             "from_id": "mallory", "to_id": agent.info.device_id, "file_name": "x.bin",
-            "size_bytes": 3, "sha256": sha256_hex(b"abc"), "total_chunks": 1,
+            "size_bytes": 3, "sha256": sha256_hex(b"abc"), "total_chunks": 1, "request_id": "m1",
         })),
         vec![],
     )
@@ -352,15 +373,16 @@ async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // Declared hash is for "abc" but the chunk carries "xyz".
+    let (xyz_hdrs, xyz_rid) = ctrl_headers(&controller, &agent.info.device_id, &sha256_hex(b"abc"));
     let (status, view) = call(
         app.clone(),
         Method::POST,
         "/transfers",
         Some(json!({
             "from_id": controller.info.device_id, "to_id": agent.info.device_id, "file_name": "x.bin",
-            "size_bytes": 3, "sha256": sha256_hex(b"abc"), "total_chunks": 1,
+            "size_bytes": 3, "sha256": sha256_hex(b"abc"), "total_chunks": 1, "request_id": xyz_rid,
         })),
-        ctrl_headers(&controller, &agent.info.device_id, &sha256_hex(b"abc")),
+        xyz_hdrs,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -393,15 +415,16 @@ async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
     assert_eq!(view["status"], "failed");
 
     // Path-like file names are reduced to a safe base name.
+    let (evil_hdrs, evil_rid) = ctrl_headers(&controller, &agent.info.device_id, &sha256_hex(b""));
     let (status, view) = call(
         app.clone(),
         Method::POST,
         "/transfers",
         Some(json!({
             "from_id": controller.info.device_id, "to_id": agent.info.device_id, "file_name": "../../evil.sh",
-            "size_bytes": 0, "sha256": sha256_hex(b""), "total_chunks": 0,
+            "size_bytes": 0, "sha256": sha256_hex(b""), "total_chunks": 0, "request_id": evil_rid,
         })),
-        ctrl_headers(&controller, &agent.info.device_id, &sha256_hex(b"")),
+        evil_hdrs,
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
