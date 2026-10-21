@@ -34,3 +34,19 @@ Known gaps: controllers do not yet hold keys (a controller is
 identified by name/ID only, so controller-initiated revocation is
 not authenticated yet), and API state is in-memory. Both are
 scheduled before any hosted/public deployment.
+
+
+## File transfer notes (v0.3)
+
+- Agent-originated chunks are individually signature-checked
+  against the chunk's own SHA-256, so a relay (or MITM of the relay
+  API) cannot substitute bytes silently; the final whole-file hash
+  is verified by the server *and* independently by the receiver.
+- Agents only ever pull files addressed to them, into their own
+  `received/` directory, under sanitised base names — nothing can
+  write outside it or choose arbitrary paths on the device.
+- Controller-originated transfers are not yet cryptographically
+  authenticated (controllers hold no keys yet, same gap as
+  controller-initiated revocation); the API only accepts them from
+  the target device's paired controller ID. Treat v0.3 transfers as
+  a local-network feature until controller keys land.
