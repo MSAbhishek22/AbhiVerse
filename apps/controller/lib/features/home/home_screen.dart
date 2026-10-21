@@ -6,6 +6,8 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../core/api_client.dart';
 import '../../core/health_client.dart';
+import 'scan_page.dart';
+import '../remote/remote_viewer.dart';
 
 enum AbhiverseConnectionState { loading, connected, unreachable }
 
@@ -101,6 +103,24 @@ class _HomeScreenState extends State<HomeScreen> {
             TextField(
               controller: nameController,
               decoration: const InputDecoration(labelText: 'This phone\'s name'),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('Scan QR code instead'),
+                onPressed: () async {
+                  final scanned = await Navigator.of(context).push<String>(
+                    MaterialPageRoute(
+                      builder: (_) => const ScanPairingPage(),
+                    ),
+                  );
+                  if (scanned != null) {
+                    codeController.text = scanned;
+                  }
+                },
+              ),
             ),
           ],
         ),
@@ -314,6 +334,42 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _confirmRevoke(DeviceView device) async {
+    final api = widget.apiClient;
+    if (api == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Revoke ${device.name}?'),
+        content: const Text(
+          'This phone will no longer be able to send files or start '
+          'remote sessions with this device, and the device will '
+          'disappear from your list. You can pair again later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Revoke'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await api.revokeDevice(device.deviceId);
+      if (!mounted) return;
+      setState(() => _notice = 'Revoked pairing with ${device.name}.');
+      _loadDevices();
+    } on AbhiverseApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _notice = e.message);
+    }
+  }
+
   Future<void> _downloadIncoming(TransferView view) async {
     final api = widget.apiClient;
     if (api == null) return;
@@ -389,10 +445,41 @@ class _HomeScreenState extends State<HomeScreen> {
               subtitle: Text(
                 '${d.platform} · ${d.online ? 'Online' : 'Offline'}',
               ),
-              trailing: IconButton(
-                icon: const Icon(Icons.upload_file),
-                tooltip: 'Send a file to ${d.name}',
-                onPressed: () => _showSendDialog(d),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.monitor),
+                    tooltip: 'Remote desktop to ${d.name}',
+                    onPressed: widget.apiClient == null
+                        ? null
+                        : () => Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => RemoteViewerPage(
+                                  device: d,
+                                  api: widget.apiClient!,
+                                ),
+                              ),
+                            ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.upload_file),
+                    tooltip: 'Send a file to ${d.name}',
+                    onPressed: () => _showSendDialog(d),
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip: 'Device actions',
+                    onSelected: (value) {
+                      if (value == 'revoke') _confirmRevoke(d);
+                    },
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(
+                        value: 'revoke',
+                        child: Text('Revoke pairing'),
+                      ),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
