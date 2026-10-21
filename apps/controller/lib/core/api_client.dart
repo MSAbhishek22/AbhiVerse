@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'config.dart';
@@ -65,9 +66,10 @@ class ClaimResult {
 
 /// Client for the devices + pairing endpoints of the API.
 class ApiClient {
-  ApiClient({required this.config, http.Client? client})
+  ApiClient({required this.config, http.Client? client, String? controllerId})
       : _client = client ?? http.Client(),
-        controllerId = 'controller-${Random.secure().nextInt(1 << 32)}';
+        controllerId =
+            controllerId ?? 'controller-${Random.secure().nextInt(1 << 32)}';
 
   final AbhiverseEndpointConfig config;
   final http.Client _client;
@@ -144,5 +146,161 @@ class ApiClient {
     }
   }
 
+
+  /// Create a transfer of [bytes] to device [toId], upload every
+  /// chunk, and ask the server to verify the assembled hash.
+  /// [onProgress] reports (chunksSent, totalChunks) after each chunk.
+  Future<TransferView> sendBytes({
+    required String toId,
+    required String fileName,
+    required List<int> bytes,
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final digest = sha256.convert(bytes).toString();
+    final totalChunks =
+        bytes.isEmpty ? 0 : (bytes.length + transferChunkSize - 1) ~/ transferChunkSize;
+    final created = await _postJson('/transfers', {
+      'from_id': controllerId,
+      'to_id': toId,
+      'file_name': fileName,
+      'size_bytes': bytes.length,
+      'sha256': digest,
+      'total_chunks': totalChunks,
+    }, expected: 201);
+    final view = TransferView.fromJson(created);
+    for (var i = 0; i < totalChunks; i++) {
+      final start = i * transferChunkSize;
+      final end = (start + transferChunkSize > bytes.length)
+          ? bytes.length
+          : start + transferChunkSize;
+      final chunk = bytes.sublist(start, end);
+      final response = await _client
+          .put(_uri('/transfers/${view.transferId}/chunks/$i'), body: chunk)
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        throw AbhiverseApiException(
+            'Chunk ${i + 1} upload failed (HTTP ${response.statusCode}).');
+      }
+      onProgress?.call(i + 1, totalChunks);
+    }
+    final done = await _postJson(
+        '/transfers/${view.transferId}/complete', const {},
+        expected: 200);
+    return TransferView.fromJson(done);
+  }
+
+  /// Transfers addressed to this controller.
+  Future<List<TransferView>> fetchIncoming() async {
+    final http.Response response;
+    try {
+      response = await _client
+          .get(_uri('/transfers?for=$controllerId'))
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+    }
+    if (response.statusCode != 200) {
+      throw AbhiverseApiException(
+          'Server returned HTTP ${response.statusCode} for transfers.');
+    }
+    try {
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      final raw = decoded['transfers'] as List<dynamic>;
+      return raw
+          .map((e) => TransferView.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      throw const AbhiverseApiException('Malformed transfers response.');
+    }
+  }
+
+  /// Download all chunks of a completed transfer and verify the
+  /// SHA-256 locally before returning the bytes. Throws if the
+  /// assembled file does not match the declared hash.
+  Future<List<int>> downloadBytes(TransferView view) async {
+    final out = <int>[];
+    for (var i = 0; i < view.totalChunks; i++) {
+      final response = await _client
+          .get(_uri('/transfers/${view.transferId}/chunks/$i'))
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        throw AbhiverseApiException(
+            'Chunk ${i + 1} download failed (HTTP ${response.statusCode}).');
+      }
+      out.addAll(response.bodyBytes);
+    }
+    final digest = sha256.convert(out).toString();
+    if (digest != view.sha256) {
+      throw const AbhiverseApiException(
+          'Downloaded file failed its SHA-256 check — not saving it.');
+    }
+    return out;
+  }
+
+  Future<Map<String, dynamic>> _postJson(
+    String path,
+    Map<String, dynamic> body, {
+    required int expected,
+  }) async {
+    final http.Response response;
+    try {
+      response = await _client
+          .post(
+            _uri(path),
+            headers: {'content-type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+    }
+    if (response.statusCode != expected) {
+      throw AbhiverseApiException(
+          'Server returned HTTP ${response.statusCode} for $path.');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
   void close() => _client.close();
 }
+/// A file transfer as reported by the API (mirrors Rust TransferView).
+class TransferView {
+  const TransferView({
+    required this.transferId,
+    required this.fromId,
+    required this.toId,
+    required this.fileName,
+    required this.sizeBytes,
+    required this.sha256,
+    required this.totalChunks,
+    required this.receivedChunks,
+    required this.status,
+  });
+
+  final String transferId;
+  final String fromId;
+  final String toId;
+  final String fileName;
+  final int sizeBytes;
+  final String sha256;
+  final int totalChunks;
+  final List<int> receivedChunks;
+  final String status; // receiving | complete | failed
+
+  factory TransferView.fromJson(Map<String, dynamic> json) {
+    return TransferView(
+      transferId: json['transfer_id'] as String,
+      fromId: json['from_id'] as String,
+      toId: json['to_id'] as String,
+      fileName: json['file_name'] as String,
+      sizeBytes: json['size_bytes'] as int,
+      sha256: json['sha256'] as String,
+      totalChunks: json['total_chunks'] as int,
+      receivedChunks: (json['received_chunks'] as List<dynamic>).cast<int>(),
+      status: json['status'] as String,
+    );
+  }
+}
+
+/// Chunk size shared with the Rust transfer engine.
+const int transferChunkSize = 256 * 1024;
