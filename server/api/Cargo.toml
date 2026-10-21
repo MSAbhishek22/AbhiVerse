@@ -9,6 +9,7 @@ description = "ABHIVERSE coordination API (Task 001: health check only)"
 axum = "0.8"
 abhiverse-protocol = { path = "../../crates/protocol" }
 abhiverse-identity = { path = "../../crates/identity" }
+abhiverse-file-transfer = { path = "../../crates/file-transfer" }
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
