@@ -1,4 +1,8 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../../core/api_client.dart';
 import '../../core/health_client.dart';
@@ -23,8 +27,9 @@ class _HomeScreenState extends State<HomeScreen> {
   HealthResponse? _health;
   String? _error;
   List<DeviceView> _devices = const [];
+  List<TransferView> _incoming = const [];
   String? _devicesError;
-  String? _pairingMessage;
+  String? _notice;
 
   @override
   void initState() {
@@ -59,9 +64,11 @@ class _HomeScreenState extends State<HomeScreen> {
     if (api == null) return;
     try {
       final devices = await api.fetchDevices();
+      final incoming = await api.fetchIncoming();
       if (!mounted) return;
       setState(() {
         _devices = devices;
+        _incoming = incoming;
         _devicesError = null;
       });
     } on AbhiverseApiException catch (e) {
@@ -116,7 +123,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final (code, name) = result;
     final api = widget.apiClient;
     if (api == null || code.length != 6) {
-      setState(() => _pairingMessage = 'Enter the 6-digit code from the computer.');
+      setState(() => _notice = 'Enter the 6-digit code from the computer.');
       return;
     }
     try {
@@ -125,12 +132,12 @@ class _HomeScreenState extends State<HomeScreen> {
         controllerName: name.isEmpty ? 'My Phone' : name,
       );
       if (!mounted) return;
-      setState(() => _pairingMessage =
+      setState(() => _notice =
           'Request sent to ${claim.agentName}. Approve it on the computer to finish pairing.');
       await _loadDevices();
     } on AbhiverseApiException catch (e) {
       if (!mounted) return;
-      setState(() => _pairingMessage = e.message);
+      setState(() => _notice = e.message);
     }
   }
 
@@ -160,6 +167,8 @@ class _HomeScreenState extends State<HomeScreen> {
               if (_state == AbhiverseConnectionState.connected) ...[
                 const SizedBox(height: 24),
                 _devicesSection(context),
+                const SizedBox(height: 24),
+                _incomingSection(context),
               ],
             ],
           ),
@@ -230,6 +239,122 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _showSendDialog(DeviceView device) async {
+    final api = widget.apiClient;
+    if (api == null) return;
+    final nameController = TextEditingController(text: 'note.txt');
+    final contentController = TextEditingController();
+    var sending = false;
+    var progress = '';
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Send a file to ${device.name}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'File name'),
+              ),
+              TextField(
+                controller: contentController,
+                maxLines: 4,
+                decoration: const InputDecoration(labelText: 'Text content'),
+              ),
+              if (sending) ...[
+                const SizedBox(height: 12),
+                Text(progress),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: sending ? null : () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: sending
+                  ? null
+                  : () async {
+                      setDialogState(() {
+                        sending = true;
+                        progress = 'Preparing…';
+                      });
+                      try {
+                        final bytes = utf8.encode(contentController.text);
+                        final view = await api.sendBytes(
+                          toId: device.deviceId,
+                          fileName: nameController.text.trim().isEmpty
+                              ? 'note.txt'
+                              : nameController.text.trim(),
+                          bytes: bytes,
+                          onProgress: (sent, total) => setDialogState(
+                              () => progress = 'Chunk $sent of $total sent'),
+                        );
+                        if (!dialogContext.mounted) return;
+                        Navigator.pop(dialogContext);
+                        if (!mounted) return;
+                        setState(() => _notice = view.status == 'complete'
+                            ? 'Sent ${view.fileName} — the server verified its SHA-256 hash.'
+                            : 'Transfer finished with status: ${view.status}');
+                      } on AbhiverseApiException catch (e) {
+                        setDialogState(() {
+                          sending = false;
+                          progress = e.message;
+                        });
+                      }
+                    },
+              child: const Text('Send'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _downloadIncoming(TransferView view) async {
+    final api = widget.apiClient;
+    if (api == null) return;
+    try {
+      final bytes = await api.downloadBytes(view);
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/${view.fileName}');
+      await file.writeAsBytes(bytes, flush: true);
+      if (!mounted) return;
+      setState(() => _notice =
+          'Saved & SHA-256 verified: ${view.fileName} (${bytes.length} bytes)');
+    } on AbhiverseApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _notice = e.message);
+    }
+  }
+
+  Widget _incomingSection(BuildContext context) {
+    if (_incoming.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Files for you', style: Theme.of(context).textTheme.titleMedium),
+        ..._incoming.map(
+          (f) => ListTile(
+            leading: const Icon(Icons.insert_drive_file),
+            title: Text(f.fileName),
+            subtitle: Text('${f.sizeBytes} bytes · ${f.status}'),
+            trailing: f.status == 'complete'
+                ? IconButton(
+                    icon: const Icon(Icons.download),
+                    tooltip: 'Download and verify',
+                    onPressed: () => _downloadIncoming(f),
+                  )
+                : null,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _devicesSection(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -264,6 +389,11 @@ class _HomeScreenState extends State<HomeScreen> {
               subtitle: Text(
                 '${d.platform} · ${d.online ? 'Online' : 'Offline'}',
               ),
+              trailing: IconButton(
+                icon: const Icon(Icons.upload_file),
+                tooltip: 'Send a file to ${d.name}',
+                onPressed: () => _showSendDialog(d),
+              ),
             ),
           ),
         const SizedBox(height: 12),
@@ -272,9 +402,9 @@ class _HomeScreenState extends State<HomeScreen> {
           icon: const Icon(Icons.link),
           label: const Text('Pair a device'),
         ),
-        if (_pairingMessage != null) ...[
+        if (_notice != null) ...[
           const SizedBox(height: 8),
-          Text(_pairingMessage!, textAlign: TextAlign.center),
+          Text(_notice!, textAlign: TextAlign.center),
         ],
       ],
     );
