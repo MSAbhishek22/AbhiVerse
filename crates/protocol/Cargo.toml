@@ -1,0 +1,10 @@
+[package]
+name = "abhiverse-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types and protocol constants for ABHIVERSE"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
