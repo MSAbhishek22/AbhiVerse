@@ -13,7 +13,11 @@ path = "src/main.rs"
 abhiverse-protocol = { path = "../../crates/protocol" }
 abhiverse-identity = { path = "../../crates/identity" }
 abhiverse-file-transfer = { path = "../../crates/file-transfer" }
+abhiverse-win-input = { path = "../../crates/win-input" }
+openh264 = "0.6"
+bytes = "1"
 ureq = { version = "2", features = ["json"] }
+qrcode = { version = "0.14", default-features = false }
 webrtc = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde.workspace = true
