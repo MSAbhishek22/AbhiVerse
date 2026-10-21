@@ -150,4 +150,66 @@ void main() {
     expect(badClient.downloadBytes(view), throwsA(isA<AbhiverseApiException>()));
   });
 
+  test('session signalling: rtc config, create, fetch, end', () async {
+    final mock = MockClient((request) async {
+      if (request.url.path == '/config/rtc') {
+        return http.Response(
+          jsonEncode({
+            'ice_servers': [
+              {'urls': ['stun:stun.l.google.com:19302']}
+            ]
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/sessions' && request.method == 'POST') {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['sdp_offer'], 'offer-sdp');
+        return http.Response(
+          jsonEncode({
+            'session_id': 's1',
+            'device_id': body['device_id'],
+            'controller_id': body['controller_id'],
+            'status': 'offered',
+            'sdp_offer': 'offer-sdp',
+            'sdp_answer': null,
+            'created_at': 1,
+            'expires_at': 121,
+          }),
+          201,
+        );
+      }
+      if (request.url.path == '/sessions/s1') {
+        return http.Response(
+          jsonEncode({
+            'session_id': 's1', 'device_id': 'dev1', 'controller_id': 'c',
+            'status': 'answered', 'sdp_offer': 'offer-sdp',
+            'sdp_answer': 'answer-sdp', 'created_at': 1, 'expires_at': 121,
+          }),
+          200,
+        );
+      }
+      if (request.url.path == '/sessions/s1/end') {
+        return http.Response(
+          jsonEncode({
+            'session_id': 's1', 'device_id': 'dev1', 'controller_id': 'c',
+            'status': 'ended', 'sdp_offer': 'offer-sdp',
+            'sdp_answer': 'answer-sdp', 'created_at': 1, 'expires_at': 121,
+          }),
+          200,
+        );
+      }
+      return http.Response('nf', 404);
+    });
+    final client = ApiClient(config: config, client: mock);
+    final servers = await client.fetchRtcConfig();
+    expect(servers.single.urls.single, startsWith('stun:'));
+    final created = await client.createSession(deviceId: 'dev1', sdpOffer: 'offer-sdp');
+    expect(created.status, 'offered');
+    final fetched = await client.fetchSession('s1');
+    expect(fetched.sdpAnswer, 'answer-sdp');
+    final ended = await client.endSession('s1');
+    expect(ended.status, 'ended');
+  });
+
 }
