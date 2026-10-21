@@ -85,3 +85,136 @@ mod tests {
         assert!(!info.platform.is_empty());
     }
 }
+// ---------- Task 002: device identity ----------
+
+/// What a device is in the ecosystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    Agent,
+    Controller,
+}
+
+/// Public identity of a device. The private key never leaves the device
+/// and is never part of this payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    /// Fingerprint of the public key (first 16 bytes of SHA-256, hex).
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub kind: DeviceKind,
+    /// Ed25519 public key, hex-encoded (64 chars).
+    pub public_key: String,
+}
+
+// ---------- Task 003: pairing ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingStatus {
+    Pending,
+    Claimed,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePairingRequest {
+    pub agent: DeviceInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePairingResponse {
+    pub pairing_id: String,
+    /// 6-digit code. Short-lived and single-use; it bootstraps trust,
+    /// it is never a credential by itself.
+    pub code: String,
+    /// Unix seconds when the code stops working.
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimPairingRequest {
+    pub code: String,
+    pub controller_id: String,
+    pub controller_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingView {
+    pub pairing_id: String,
+    pub status: PairingStatus,
+    pub agent: DeviceInfo,
+    pub controller_id: Option<String>,
+    pub controller_name: Option<String>,
+    pub expires_at: i64,
+}
+
+/// Signed decision sent by the agent being paired. The signature
+/// proves possession of the agent's private key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingDecisionRequest {
+    /// Hex Ed25519 signature over `pairing_approve_message` or
+    /// `pairing_reject_message`.
+    pub signature: String,
+}
+
+pub fn pairing_approve_message(pairing_id: &str, code: &str) -> String {
+    format!("abhiverse-pairing-approve:{pairing_id}:{code}")
+}
+
+pub fn pairing_reject_message(pairing_id: &str, code: &str) -> String {
+    format!("abhiverse-pairing-reject:{pairing_id}:{code}")
+}
+
+// ---------- Task 004: presence & revocation ----------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    pub timestamp: i64,
+    /// Hex Ed25519 signature over `heartbeat_message`.
+    pub signature: String,
+}
+
+pub fn heartbeat_message(device_id: &str, timestamp: i64) -> String {
+    format!("abhiverse-heartbeat:{device_id}:{timestamp}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeRequest {
+    pub timestamp: i64,
+    /// Hex Ed25519 signature over `revoke_message`, made by the
+    /// device being revoked (self-revocation).
+    pub signature: String,
+}
+
+pub fn revoke_message(device_id: &str, timestamp: i64) -> String {
+    format!("abhiverse-revoke:{device_id}:{timestamp}")
+}
+
+/// A paired device as shown to controllers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceView {
+    pub info: DeviceInfo,
+    pub paired_with_name: String,
+    /// Unix seconds of the last accepted heartbeat, if any.
+    pub last_seen: Option<i64>,
+    /// True when the last heartbeat is fresher than the server's
+    /// online window (30s).
+    pub online: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceListResponse {
+    pub devices: Vec<DeviceView>,
+}
+
+/// Current unix time in seconds.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
