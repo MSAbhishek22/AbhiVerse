@@ -19,3 +19,18 @@ are non-negotiable from Phase 1 onward:
 Known limitation (v0.1): Task 001 has no authentication because it
 exposes no capabilities and binds to localhost only. Do not deploy
 it publicly.
+
+
+## Implemented in v0.2 (Tasks 002–004)
+
+- Device IDs are public-key fingerprints — an ID cannot be forged
+  without the private key.
+- Pairing approval/rejection, heartbeats and revocation all require
+  Ed25519 signatures from the device key; timestamps bound replay.
+- Agent private keys live in `keypair.json` with `0600` permissions
+  on Unix (Windows ACL hardening is still TODO).
+
+Known gaps: controllers do not yet hold keys (a controller is
+identified by name/ID only, so controller-initiated revocation is
+not authenticated yet), and API state is in-memory. Both are
+scheduled before any hosted/public deployment.
