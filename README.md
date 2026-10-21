@@ -7,7 +7,7 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.5.1 — Tasks 001–006 + controller keys, persistence & polish.**
+> **Status: v0.5.2 — validation & release readiness.**
 > Device identity (Ed25519) for agents *and* controllers, pairing
 > with signed approval (code or QR), presence, revocation signed by
 > either side, chunked file transfer with SHA-256 integrity and
@@ -17,6 +17,15 @@ across networks.
 > explicit agent flag, and a Flutter viewer with touch/keyboard
 > input. Media/input verification on real hardware is the remaining
 > step — the dev sandbox blocks UDP; see `docs/remote-desktop.md`.
+
+## Docs
+
+- `docs/real-device-setup.md` — build & run on a real laptop + phone
+- `docs/real-device-test.md` — the validation test matrix (release blocker)
+- `docs/known-limitations.md` — the honest list, incl. what is not yet verified on hardware
+- `docs/release.md` — how a version ships (tags, artifacts, checksums, manual GitHub steps)
+- `docs/threat-model.md` — security model + the v0.5.2 review
+- `docs/turn.md` — TURN deployment, incl. short-lived credentials
 
 ## What exists today
 
