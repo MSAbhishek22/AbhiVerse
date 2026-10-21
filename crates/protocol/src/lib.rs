@@ -155,8 +155,10 @@ pub struct CreatePairingResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimPairingRequest {
     pub code: String,
-    pub controller_id: String,
-    pub controller_name: String,
+    /// The controller's public identity (Task 007): its device_id is
+    /// the fingerprint of its own Ed25519 key, which the API stores
+    /// at pairing time and later uses to verify controller signatures.
+    pub controller: DeviceInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -429,4 +431,13 @@ pub enum InputEvent {
     KeyDown { code: String },
     KeyUp { code: String },
     Text { text: String },
+}
+
+pub fn session_create_message(
+    device_id: &str,
+    controller_id: &str,
+    offer_sha256: &str,
+    timestamp: i64,
+) -> String {
+    format!("abhiverse-session-create:{device_id}:{controller_id}:{offer_sha256}:{timestamp}")
 }
