@@ -31,13 +31,14 @@ void main() {
 
   test('signing messages match the Rust protocol formats', () {
     expect(
-      transferCreateMessage(fromId: 'a', toId: 'b', sha256Hex: 'cc', timestamp: 7),
-      'abhiverse-transfer-create:a:b:cc:7',
+      transferCreateMessage(
+          fromId: 'a', toId: 'b', sha256Hex: 'cc', timestamp: 7, requestId: 'r1'),
+      'abhiverse-transfer-create:a:b:cc:7:r1',
     );
     expect(
       sessionCreateMessage(
-          deviceId: 'd', controllerId: 'c', offerSha256Hex: 'ee', timestamp: 9),
-      'abhiverse-session-create:d:c:ee:9',
+          deviceId: 'd', controllerId: 'c', offerSha256Hex: 'ee', timestamp: 9, requestId: 'r2'),
+      'abhiverse-session-create:d:c:ee:9:r2',
     );
     expect(revokeMessage(deviceId: 'd', timestamp: 3), 'abhiverse-revoke:d:3');
   });
