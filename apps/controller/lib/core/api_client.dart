@@ -261,6 +261,102 @@ class ApiClient {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+
+  /// ICE servers this deployment asks peers to use (STUN/TURN).
+  Future<List<IceServerConfig>> fetchRtcConfig() async {
+    final http.Response response;
+    try {
+      response = await _client
+          .get(_uri('/config/rtc'))
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+    }
+    if (response.statusCode != 200) {
+      throw AbhiverseApiException(
+          'Server returned HTTP ${response.statusCode} for RTC config.');
+    }
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    return (decoded['ice_servers'] as List<dynamic>)
+        .map((e) => IceServerConfig.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Ask a paired device for a remote-desktop session, carrying our
+  /// WebRTC SDP offer. The device user must approve before answering.
+  Future<SessionView> createSession({
+    required String deviceId,
+    required String sdpOffer,
+  }) async {
+    final created = await _postJson('/sessions', {
+      'device_id': deviceId,
+      'controller_id': controllerId,
+      'sdp_offer': sdpOffer,
+    }, expected: 201);
+    return SessionView.fromJson(created);
+  }
+
+  Future<SessionView> fetchSession(String sessionId) async {
+    final http.Response response;
+    try {
+      response = await _client
+          .get(_uri('/sessions/$sessionId?as=$controllerId'))
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+    }
+    if (response.statusCode != 200) {
+      throw AbhiverseApiException(
+          'Server returned HTTP ${response.statusCode} for session.');
+    }
+    return SessionView.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  /// Trickle one local ICE candidate to the session.
+  Future<void> postIceCandidate({
+    required String sessionId,
+    required String candidate,
+    String? sdpMid,
+    int? sdpMlineIndex,
+  }) async {
+    await _postJson('/sessions/$sessionId/ice', {
+      'from_id': controllerId,
+      'candidate': candidate,
+      'sdp_mid': sdpMid,
+      'sdp_mline_index': sdpMlineIndex,
+    }, expected: 200);
+  }
+
+  /// The other side's ICE candidates with seq > [after].
+  Future<List<Map<String, dynamic>>> fetchIceCandidates({
+    required String sessionId,
+    int after = 0,
+  }) async {
+    final http.Response response;
+    try {
+      response = await _client
+          .get(_uri('/sessions/$sessionId/ice?as=$controllerId&after=$after'))
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+    }
+    if (response.statusCode != 200) {
+      throw AbhiverseApiException(
+          'Server returned HTTP ${response.statusCode} for ICE candidates.');
+    }
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    return (decoded['candidates'] as List<dynamic>)
+        .cast<Map<String, dynamic>>();
+  }
+
+  Future<SessionView> endSession(String sessionId) async {
+    final ended = await _postJson('/sessions/$sessionId/end', {
+      'from_id': controllerId,
+    }, expected: 200);
+    return SessionView.fromJson(ended);
+  }
+
   void close() => _client.close();
 }
 /// A file transfer as reported by the API (mirrors Rust TransferView).
@@ -304,3 +400,47 @@ class TransferView {
 
 /// Chunk size shared with the Rust transfer engine.
 const int transferChunkSize = 256 * 1024;
+/// A remote-desktop session as reported by the API (mirrors Rust
+/// `SessionView`). The SDP/ICE plumbing is used by the WebRTC
+/// viewer when it lands (slice 006b).
+class SessionView {
+  const SessionView({
+    required this.sessionId,
+    required this.deviceId,
+    required this.controllerId,
+    required this.status,
+    required this.sdpAnswer,
+  });
+
+  final String sessionId;
+  final String deviceId;
+  final String controllerId;
+  final String status; // offered | answered | rejected | ended | expired
+  final String? sdpAnswer;
+
+  factory SessionView.fromJson(Map<String, dynamic> json) {
+    return SessionView(
+      sessionId: json['session_id'] as String,
+      deviceId: json['device_id'] as String,
+      controllerId: json['controller_id'] as String,
+      status: json['status'] as String,
+      sdpAnswer: json['sdp_answer'] as String?,
+    );
+  }
+}
+
+/// One ICE server entry from `GET /config/rtc`.
+class IceServerConfig {
+  const IceServerConfig({required this.urls, this.username, this.credential});
+  final List<String> urls;
+  final String? username;
+  final String? credential;
+
+  factory IceServerConfig.fromJson(Map<String, dynamic> json) {
+    return IceServerConfig(
+      urls: (json['urls'] as List<dynamic>).cast<String>(),
+      username: json['username'] as String?,
+      credential: json['credential'] as String?,
+    );
+  }
+}
