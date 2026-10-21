@@ -186,24 +186,33 @@ class ApiClient {
     final digest = sha256.convert(bytes).toString();
     final totalChunks =
         bytes.isEmpty ? 0 : (bytes.length + transferChunkSize - 1) ~/ transferChunkSize;
-    final ts = nowUnix();
-    final headers = await _signatureHeaders(
-      ts,
-      transferCreateMessage(
-        fromId: controllerId,
-        toId: toId,
-        sha256Hex: digest,
-        timestamp: ts,
-      ),
+    final requestId = newRequestId();
+    final created = await _postJson(
+      '/transfers',
+      {
+        'from_id': controllerId,
+        'to_id': toId,
+        'file_name': fileName,
+        'size_bytes': bytes.length,
+        'sha256': digest,
+        'total_chunks': totalChunks,
+        'request_id': requestId,
+      },
+      expected: 201,
+      signedHeaders: () async {
+        final ts = nowUnix();
+        return _signatureHeaders(
+          ts,
+          transferCreateMessage(
+            fromId: controllerId,
+            toId: toId,
+            sha256Hex: digest,
+            timestamp: ts,
+            requestId: requestId,
+          ),
+        );
+      },
     );
-    final created = await _postJson('/transfers', {
-      'from_id': controllerId,
-      'to_id': toId,
-      'file_name': fileName,
-      'size_bytes': bytes.length,
-      'sha256': digest,
-      'total_chunks': totalChunks,
-    }, expected: 201, headers: headers);
     final view = TransferView.fromJson(created);
     for (var i = 0; i < totalChunks; i++) {
       final start = i * transferChunkSize;
@@ -278,16 +287,19 @@ class ApiClient {
     String path,
     Map<String, dynamic> body, {
     required int expected,
-    Map<String, String> headers = const {},
+    Future<Map<String, String>> Function()? signedHeaders,
   }) async {
     // One retry on transport failure: on lossy networks a pooled
     // connection can die after the server processed the request but
     // before its response arrived ("connection closed before full
-    // header"). The retry uses a fresh connection. Note the server
-    // may have applied the first attempt (e.g. a transfer create) —
-    // callers treat the returned view as authoritative, and an
-    // orphaned duplicate is garbage-collected by expiry in practice.
+    // header"). The retry uses a fresh connection and RE-SIGNS with
+    // a fresh timestamp (same request_id): the server's replay
+    // protection would reject a byte-identical resend, while a
+    // re-signed retry of a create the server never saw still works.
     for (var attempt = 0; attempt < 2; attempt++) {
+      final headers = signedHeaders == null
+          ? const <String, String>{}
+          : await signedHeaders();
       final http.Response response;
       try {
         response = await _client
@@ -372,21 +384,30 @@ class ApiClient {
     required String sdpOffer,
   }) async {
     final offerHash = sha256.convert(utf8.encode(sdpOffer)).toString();
-    final ts = nowUnix();
-    final headers = await _signatureHeaders(
-      ts,
-      sessionCreateMessage(
-        deviceId: deviceId,
-        controllerId: controllerId,
-        offerSha256Hex: offerHash,
-        timestamp: ts,
-      ),
+    final requestId = newRequestId();
+    final created = await _postJson(
+      '/sessions',
+      {
+        'device_id': deviceId,
+        'controller_id': controllerId,
+        'sdp_offer': sdpOffer,
+        'request_id': requestId,
+      },
+      expected: 201,
+      signedHeaders: () async {
+        final ts = nowUnix();
+        return _signatureHeaders(
+          ts,
+          sessionCreateMessage(
+            deviceId: deviceId,
+            controllerId: controllerId,
+            offerSha256Hex: offerHash,
+            timestamp: ts,
+            requestId: requestId,
+          ),
+        );
+      },
     );
-    final created = await _postJson('/sessions', {
-      'device_id': deviceId,
-      'controller_id': controllerId,
-      'sdp_offer': sdpOffer,
-    }, expected: 201, headers: headers);
     return SessionView.fromJson(created);
   }
 
