@@ -50,3 +50,30 @@ Ed25519 public key (hex). The API rejects registrations whose
 
 API state is in-memory in v0.2 (restart clears pairings); persistent
 storage is planned with the hosted-service phase.
+
+
+## File transfer (Task 005)
+
+Files move in 256 KiB chunks through the API relay (peer-to-peer
+arrives with WebRTC). The sender declares the whole file's SHA-256
+up front; the server verifies it when the transfer completes, and
+receivers verify again locally after assembly.
+
+- `POST /transfers` `CreateTransferRequest` → `201 TransferView`.
+  Agent senders must sign `abhiverse-transfer-create:{from}:{to}:{sha256}:{ts}`
+  (headers `x-abhiverse-timestamp`, `x-abhiverse-signature`).
+  Controller senders must be the target device's paired controller.
+- `PUT /transfers/{id}/chunks/{index}` — raw chunk bytes. Agent
+  senders sign `abhiverse-chunk:{id}:{index}:{chunk_sha256}:{ts}`.
+  Re-uploading a chunk is idempotent, so uploads resume by asking
+  `GET /transfers/{id}` which indexes are still missing.
+- `GET /transfers/{id}` → `TransferView` (with `received_chunks`).
+- `GET /transfers?for={recipient_id}` → transfers for a recipient.
+- `GET /transfers/{id}/chunks/{index}` — agent recipients sign
+  `abhiverse-download:{id}:{index}:{ts}`; controller recipients use
+  the unguessable transfer ID as the v0.3 capability.
+- `POST /transfers/{id}/complete` — server assembles and compares
+  the SHA-256: match → `complete`; mismatch → `422`, status `failed`.
+
+Chunks live under `ABHIVERSE_TRANSFER_DIR` (default: a per-process
+temp directory) as one `.part` file per transfer.
