@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 abhiverse-protocol = { path = "../../crates/protocol" }
 abhiverse-identity = { path = "../../crates/identity" }
+abhiverse-file-transfer = { path = "../../crates/file-transfer" }
 ureq = { version = "2", features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
