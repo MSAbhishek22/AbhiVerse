@@ -37,6 +37,8 @@ pub struct PairingRecord {
     pub api_url: String,
     pub pairing_id: String,
     pub controller_name: String,
+    #[serde(default)]
+    pub controller_id: String,
 }
 
 pub fn pairing_path(data_dir: &Path) -> PathBuf {
@@ -74,6 +76,7 @@ mod tests {
             api_url: "http://127.0.0.1:8080".into(),
             pairing_id: "abc".into(),
             controller_name: "Pixel".into(),
+            controller_id: "ctrl-1".into(),
         };
         save_pairing(&dir, &record).unwrap();
         assert_eq!(load_pairing(&dir), Some(record));
