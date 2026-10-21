@@ -3,12 +3,13 @@ resolver = "2"
 members = [
     "crates/protocol",
     "crates/identity",
+    "crates/file-transfer",
     "server/api",
     "agents/windows",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/YOUR-USERNAME/abhiverse"
