@@ -239,6 +239,30 @@ struct RdSession {
 struct AppState {
     store: Mutex<Store>,
     chunk_dir: PathBuf,
+    /// Accepted request signatures -> expiry (unix secs). A second
+    /// presentation of the same signature inside the timestamp
+    /// window is a replay and is rejected (v0.5.2 security review).
+    replay: Arc<Mutex<std::collections::HashMap<String, i64>>>,
+    /// Recent failed pairing-claim timestamps (brute-force throttle).
+    claim_failures: Arc<Mutex<Vec<i64>>>,
+}
+
+/// Returns true when `signature` was already accepted once (and
+/// records it otherwise). Entries are pruned once their timestamp
+/// window has fully passed.
+fn replay_seen(
+    replay: &Mutex<std::collections::HashMap<String, i64>>,
+    signature: &str,
+    ts: i64,
+) -> bool {
+    let now = now_unix();
+    let mut seen = replay.lock().unwrap();
+    seen.retain(|_, expiry| *expiry > now);
+    if seen.contains_key(signature) {
+        return true;
+    }
+    seen.insert(signature.to_string(), ts + MAX_CLOCK_SKEW_SECS + 10);
+    false
 }
 
 type Shared = Arc<AppState>;
@@ -270,6 +294,8 @@ pub fn build_app_with_paths(state_file: Option<PathBuf>, chunk_dir: PathBuf) -> 
     let store: Shared = Arc::new(AppState {
         store: Mutex::new(initial),
         chunk_dir,
+        replay: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        claim_failures: Arc::new(Mutex::new(Vec::new())),
     });
     Router::new()
         .route("/health", get(health))
@@ -391,6 +417,22 @@ async fn claim_pairing(
     State(store): State<Shared>,
     Json(req): Json<ClaimPairingRequest>,
 ) -> Response {
+    // Brute-force throttle (v0.5.2): 6-digit codes have a million
+    // combinations, so failed claims are rate-limited globally —
+    // 10 failures inside a minute locks claiming briefly. For a
+    // personal coordination server the global scope is acceptable;
+    // the pairing approval on the device remains the real gate.
+    let claim_failures = store.claim_failures.clone();
+    {
+        let now = now_unix();
+        let fails = claim_failures.lock().unwrap();
+        if fails.iter().filter(|ts| now - **ts < 60).count() >= 10 {
+            return err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many failed pairing attempts; try again in a minute",
+            );
+        }
+    }
     let mut store = store.store.lock().unwrap();
     // First pass: does any live session carry this code?
     let mut found: Option<String> = None;
@@ -409,6 +451,10 @@ async fn claim_pairing(
         return err(StatusCode::CONFLICT, "pairing code already used");
     }
     let Some(id) = found else {
+        let now = now_unix();
+        let mut fails = claim_failures.lock().unwrap();
+        fails.retain(|ts| now - *ts < 300);
+        fails.push(now);
         return err(StatusCode::NOT_FOUND, "unknown or expired pairing code");
     };
     if !valid_device_info(&req.controller) {
@@ -523,6 +569,7 @@ async fn heartbeat(
     Path(id): Path<String>,
     Json(req): Json<HeartbeatRequest>,
 ) -> Response {
+    let replay = store.replay.clone();
     let mut store = store.store.lock().unwrap();
     let Some(device) = store.devices.get_mut(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown device");
@@ -543,6 +590,9 @@ async fn heartbeat(
             "signature does not match device key",
         );
     }
+    if replay_seen(&replay, &req.signature, req.timestamp) {
+        return err(StatusCode::UNAUTHORIZED, "replayed heartbeat");
+    }
     device.last_seen = Some(now_unix());
     Json(serde_json::json!({ "status": "ok" })).into_response()
 }
@@ -552,6 +602,7 @@ async fn revoke_device(
     Path(id): Path<String>,
     Json(req): Json<RevokeRequest>,
 ) -> Response {
+    let replay = store.replay.clone();
     let mut store = store.store.lock().unwrap();
     let Some(device) = store.devices.get_mut(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown device");
@@ -576,7 +627,23 @@ async fn revoke_device(
             "signature does not match device or paired controller key",
         );
     }
+    let _ = replay_seen(&replay, &req.signature, req.timestamp);
     device.revoked = true;
+    // Revocation must kill live remote sessions immediately: the
+    // agent polls session status and stops streaming/injecting as
+    // soon as it reads Ended (v0.5.2 security review).
+    let device_id = id.clone();
+    for rec in store.rd_sessions.values_mut() {
+        if rec.device_id == device_id
+            && !matches!(
+                rec.status,
+                SessionStatus::Ended | SessionStatus::Rejected | SessionStatus::Expired
+            )
+        {
+            rec.status = SessionStatus::Ended;
+        }
+    }
+    store.persist();
     Json(serde_json::json!({ "status": "revoked" })).into_response()
 }
 
@@ -598,7 +665,12 @@ fn header(headers: &HeaderMap, name: &str) -> Option<String> {
 /// Verify a signed request (`x-abhiverse-timestamp` +
 /// `x-abhiverse-signature`). Returns `Some(error_response)` when the
 /// signature is missing, stale or wrong; `None` when it checks out.
-fn signature_error(headers: &HeaderMap, public_key: &str, message: &str) -> Option<Response> {
+fn signature_error(
+    state: &Shared,
+    headers: &HeaderMap,
+    public_key: &str,
+    message: &str,
+) -> Option<Response> {
     let Some(ts) = header(headers, "x-abhiverse-timestamp").and_then(|v| v.parse::<i64>().ok())
     else {
         return Some(err(
@@ -621,7 +693,26 @@ fn signature_error(headers: &HeaderMap, public_key: &str, message: &str) -> Opti
             "signature does not match device key",
         ));
     }
+    if replay_seen(&state.replay, &sig, ts) {
+        return Some(err(
+            StatusCode::UNAUTHORIZED,
+            "replayed request: this signature was already used",
+        ));
+    }
     None
+}
+
+/// Largest single transfer the API will accept (default 1 GiB,
+/// override with `ABHIVERSE_MAX_TRANSFER_MB`). Bounds the disk a
+/// paired device can make the relay hold in chunks.
+fn max_transfer_bytes() -> u64 {
+    std::env::var("ABHIVERSE_MAX_TRANSFER_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1024)
+        * 1024
+        * 1024
 }
 
 fn transfer_view(id: &str, rec: &TransferRec) -> TransferView {
@@ -655,6 +746,12 @@ async fn create_transfer(
     if hex_decode(&req.sha256).map(|b| b.len()) != Some(32) {
         return err(StatusCode::BAD_REQUEST, "sha256 must be 64 hex characters");
     }
+    if req.size_bytes > max_transfer_bytes() {
+        return err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "transfer exceeds the configured size limit",
+        );
+    }
     let store = state.store.lock().unwrap();
     // Sender classification: a paired agent (sending to its paired
     // controller), or the paired controller of the target agent.
@@ -663,7 +760,8 @@ async fn create_transfer(
     let ts = header(&headers, "x-abhiverse-timestamp")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
-    let message = transfer_create_message(&req.from_id, &req.to_id, &req.sha256, ts);
+    let message =
+        transfer_create_message(&req.from_id, &req.to_id, &req.sha256, ts, &req.request_id);
     if from_is_agent {
         let device = store.devices.get(&req.from_id).unwrap();
         if device.controller_id != req.to_id {
@@ -672,7 +770,7 @@ async fn create_transfer(
                 "agents can only send to their paired controller",
             );
         }
-        if let Some(resp) = signature_error(&headers, &device.info.public_key, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &device.info.public_key, &message) {
             return resp;
         }
     } else {
@@ -689,7 +787,7 @@ async fn create_transfer(
             );
         }
         let pk = target.controller_info.public_key.clone();
-        if let Some(resp) = signature_error(&headers, &pk, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
             return resp;
         }
     }
@@ -780,7 +878,7 @@ async fn upload_chunk(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let message = chunk_upload_message(&id, index, &chunk_hash, ts);
-        if let Some(resp) = signature_error(&headers, &pk, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
             return resp;
         }
     }
@@ -826,7 +924,7 @@ async fn download_chunk(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let message = chunk_download_message(&id, index, ts);
-        if let Some(resp) = signature_error(&headers, &pk, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
             return resp;
         }
     }
@@ -875,7 +973,7 @@ async fn complete_transfer(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let message = transfer_complete_message(&id, ts);
-        if let Some(resp) = signature_error(&headers, &pk, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
             return resp;
         }
     }
@@ -1032,9 +1130,10 @@ async fn create_session(
             &req.controller_id,
             &offer_hash,
             ts,
+            &req.request_id,
         );
         let pk = device.controller_info.public_key.clone();
-        if let Some(resp) = signature_error(&headers, &pk, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
             return resp;
         }
     }
@@ -1133,7 +1232,7 @@ async fn answer_session(
         .unwrap_or(0);
     let answer_hash = abhiverse_file_transfer::sha256_hex(req.sdp_answer.as_bytes());
     let message = session_answer_message(&id, &answer_hash, ts);
-    if let Some(resp) = signature_error(&headers, &pk, &message) {
+    if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
         return resp;
     }
     let mut store = state.store.lock().unwrap();
@@ -1170,7 +1269,7 @@ async fn reject_session(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
     let message = session_reject_message(&id, ts);
-    if let Some(resp) = signature_error(&headers, &pk, &message) {
+    if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
         return resp;
     }
     let mut store = state.store.lock().unwrap();
@@ -1265,7 +1364,7 @@ async fn end_session(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let message = session_end_message(&id, ts);
-        if let Some(resp) = signature_error(&headers, &pk, &message) {
+        if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
             return resp;
         }
     }
