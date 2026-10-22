@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/MSAbhishek22/AbhiVerse/security/advisories/new
+    about: Please report exploitable flaws privately, not as public issues.
+  - name: Documentation
+    url: https://github.com/MSAbhishek22/AbhiVerse/tree/main/docs
+    about: Setup guides, the test matrix, known limitations and the threat model.
