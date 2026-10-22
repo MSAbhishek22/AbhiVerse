@@ -7,7 +7,7 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.5.2 — validation & release readiness.**
+> **Status: v0.5.3 — public beta preparation.**
 > Device identity (Ed25519) for agents *and* controllers, pairing
 > with signed approval (code or QR), presence, revocation signed by
 > either side, chunked file transfer with SHA-256 integrity and
