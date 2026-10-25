@@ -104,7 +104,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('server settings dialog validates and saves', (tester) async {
+  testWidgets('settings server dialog validates and saves', (tester) async {
     String? saved;
     var saveCalls = 0;
     await tester.pumpWidget(
@@ -122,6 +122,9 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle();
+    expect(find.text('Settings'), findsOneWidget);
+    await tester.tap(find.text('Change server'));
+    await tester.pumpAndSettle();
     expect(find.text('Server settings'), findsOneWidget);
 
     // A public http URL must be refused inside the dialog.
@@ -131,7 +134,7 @@ void main() {
     expect(find.textContaining('Refusing'), findsOneWidget);
     expect(saveCalls, 0);
 
-    // An https URL saves and closes the dialog.
+    // An https URL saves and closes the dialog, back on Settings.
     await tester.enterText(
       find.byType(TextField),
       'https://abhiverse.example:443',
@@ -140,12 +143,14 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Server settings'), findsNothing);
     expect(saved, 'https://abhiverse.example:443');
+    expect(find.text('https://abhiverse.example:443'), findsOneWidget);
 
     // Reset passes null back.
-    await tester.tap(find.byIcon(Icons.settings));
+    await tester.tap(find.text('Change server'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Reset to default'));
     await tester.pumpAndSettle();
     expect(saved, isNull);
+    expect(find.text('Default server (build setting)'), findsOneWidget);
   });
 }
