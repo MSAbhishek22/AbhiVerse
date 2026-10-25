@@ -39,3 +39,24 @@ jobs:
         run: flutter analyze
       - working-directory: apps/controller
         run: flutter test
+
+  android:
+    # Builds a release APK for sideload testing on every push to main.
+    # NOT Play-ready: Play submission needs a release keystore in
+    # GitHub secrets + signing config. Without one, Flutter signs
+    # with debug keys (installable for testing, with the standard
+    # unknown-sources prompt). The APK's default server is the
+    # emulator address, but the app's in-app server settings let
+    # any user point it at their own computer.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - working-directory: apps/controller
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abhiverse-controller-apk
+          path: apps/controller/build/app/outputs/flutter-apk/app-release.apk
