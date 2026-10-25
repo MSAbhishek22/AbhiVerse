@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use abhiverse_identity::DeviceIdentity;
 use abhiverse_protocol::{
-    now_unix, session_answer_message, session_reject_message, AnswerSessionRequest,
-    IceCandidateListResponse, IceCandidateRequest, InputEvent, RtcConfig, SessionListResponse,
-    SessionStatus, SessionView,
+    ice_candidate_message, now_unix, session_answer_message, session_reject_message,
+    signed_get_message, AnswerSessionRequest, IceCandidateListResponse, IceCandidateRequest,
+    InputEvent, RtcConfig, SessionListResponse, SessionStatus, SessionView,
 };
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -45,6 +45,7 @@ pub fn run(
 struct Signalling {
     client: reqwest::Client,
     api: String,
+    identity: Arc<DeviceIdentity>,
 }
 
 impl Signalling {
@@ -52,9 +53,21 @@ impl Signalling {
         &self,
         path: &str,
     ) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+        let device_id = &self.identity.info.device_id;
+        let signed_path = if path.contains("as=") {
+            path.to_string()
+        } else if path.contains('?') {
+            format!("{path}&as={device_id}")
+        } else {
+            format!("{path}?as={device_id}")
+        };
+        let ts = now_unix();
+        let message = signed_get_message(&signed_path, device_id, ts);
         Ok(self
             .client
-            .get(format!("{}{path}", self.api))
+            .get(format!("{}{signed_path}", self.api))
+            .header("x-abhiverse-timestamp", ts.to_string())
+            .header("x-abhiverse-signature", self.identity.sign(&message))
             .send()
             .await?
             .error_for_status()?
@@ -71,9 +84,14 @@ async fn run_async(
     let Some(record) = abhiverse_agent_windows::load_pairing(&data_dir) else {
         return Err("this device is not paired — run --pair first".into());
     };
+    let identity = Arc::new(identity);
     let sig = Signalling {
-        client: reqwest::Client::new(),
+        // 10 s timeout: signalling polls must never hang forever.
+        client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?,
         api: record.api_url.clone(),
+        identity: identity.clone(),
     };
     let device_id = identity.info.device_id.clone();
     println!(
@@ -99,7 +117,6 @@ async fn run_async(
             .build(),
     );
 
-    let identity = Arc::new(identity);
     let mut seen: HashSet<String> = HashSet::new();
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -136,6 +153,7 @@ async fn run_async(
                 let sig_client = Signalling {
                     client: sig.client.clone(),
                     api: sig.api.clone(),
+                    identity: sig.identity.clone(),
                 };
                 let id_clone = identity.clone();
                 let api_clone = webrtc_api.clone();
@@ -202,21 +220,29 @@ async fn handle_session(
     let pc = Arc::new(webrtc_api.new_peer_connection(config).await?);
     let done = Arc::new(AtomicBool::new(false));
 
-    // Local ICE candidates -> API (trickle).
+    // Local ICE candidates -> API (trickle), each post signed so
+    // a stolen session id alone cannot inject candidates.
     {
         let client = sig.client.clone();
         let api = sig.api.clone();
         let sid = session_id.clone();
         let from = device_id.clone();
+        let ice_identity = identity.clone();
         pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
             let client = client.clone();
             let api = api.clone();
             let sid = sid.clone();
             let from = from.clone();
+            let ice_identity = ice_identity.clone();
             Box::pin(async move {
                 if let Some(c) = candidate {
                     println!("agent local ICE candidate: {c}");
                     if let Ok(init) = c.to_json() {
+                        let candidate_hash =
+                            abhiverse_file_transfer::sha256_hex(init.candidate.as_bytes());
+                        let ts = now_unix();
+                        let message = ice_candidate_message(&sid, &from, &candidate_hash, ts);
+                        let signature = ice_identity.sign(&message);
                         let body = IceCandidateRequest {
                             from_id: from,
                             candidate: init.candidate,
@@ -225,6 +251,8 @@ async fn handle_session(
                         };
                         let _ = client
                             .post(format!("{api}/sessions/{sid}/ice"))
+                            .header("x-abhiverse-timestamp", ts.to_string())
+                            .header("x-abhiverse-signature", signature)
                             .json(&body)
                             .send()
                             .await;
