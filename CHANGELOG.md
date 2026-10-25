@@ -34,6 +34,15 @@ investor, competitor):
   (Caddy + coturn, the only path with a TURN fallback) and the
   no-VPS Cloudflare Tunnel path (STUN-only media), plus the rule
   that both sides must use the same API URL.
+- Autostart, done properly: `scripts/install-autostart.ps1`
+  (Startup-folder shortcut, current user, minimized console,
+  no admin, no service, no registry) plus an uninstaller and
+  `docs/autostart.md` with a full loophole audit. Safe default
+  is presence-only; unattended remote needs the explicit
+  `--remote --trust-paired` opt-in, which auto-accepts sessions
+  ONLY from the already-paired controller (anyone else is
+  rejected, never prompted) and never implies `--allow-input`.
+  The agent binary itself still never installs persistence.
   with a 1 GB client-side guard matching the
   server cap and chunk progress as before.
 - **In-app server settings.** The API URL is no longer
