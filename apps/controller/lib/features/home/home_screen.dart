@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -456,24 +456,16 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: sending
                       ? null
                       : () async {
-                          final result = await FilePicker.pickFiles(
-                            withData: true,
-                          );
-                          if (result == null || result.files.isEmpty) {
+                          // file_selector is the Flutter team's own picker:
+                          // its Android build is maintained for the current
+                          // AGP/Gradle toolchain, unlike file_picker, whose
+                          // Android module pins Kotlin 1.8 and broke the
+                          // release build (CI run #75).
+                          final picked = await openFile();
+                          if (picked == null) {
                             return;
                           }
-                          final picked = result.files.single;
-                          final bytes =
-                              picked.bytes ??
-                              (picked.path != null
-                                  ? await File(picked.path!).readAsBytes()
-                                  : null);
-                          if (bytes == null) {
-                            setDialogState(
-                              () => progress = 'Could not read that file.',
-                            );
-                            return;
-                          }
+                          final bytes = await picked.readAsBytes();
                           final tooBig = checkTransferSize(bytes.length);
                           if (tooBig != null) {
                             setDialogState(() => progress = tooBig);
