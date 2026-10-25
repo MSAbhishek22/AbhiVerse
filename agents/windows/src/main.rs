@@ -56,10 +56,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --remote: answer remote desktop sessions (with local approval).
     // --allow-input additionally enables injecting the controller's
     // input into this desktop (006c); without it, input is only logged.
+    // --trust-paired additionally auto-accepts sessions from the
+    // already-paired controller, for unattended use (laptop at home,
+    // owner away). It is OFF by default and never implies input:
+    // --allow-input stays a separate, explicit choice.
     if args.iter().any(|a| a == "--remote") {
         let allow_input = args.iter().any(|a| a == "--allow-input");
+        let trust_paired = args.iter().any(|a| a == "--trust-paired");
         let identity = load_identity()?;
-        return remote::run(identity, allow_input).map_err(|e| -> Box<dyn std::error::Error> { e });
+        return remote::run(identity, allow_input, trust_paired)
+            .map_err(|e| -> Box<dyn std::error::Error> { e });
+    }
+
+    // --trust-paired without --remote does nothing; say so instead
+    // of silently ignoring a flag the user clearly meant to set.
+    if args.iter().any(|a| a == "--trust-paired") {
+        println!("Note: --trust-paired only affects --remote sessions; ignoring it for this run.");
     }
 
     // --receive: download files addressed to this device.
