@@ -63,6 +63,15 @@ fn signed_at(id: &DeviceIdentity, msg: &str, ts: i64) -> Vec<(String, String)> {
     ]
 }
 
+fn signed_get(id: &DeviceIdentity, path: &str) -> Vec<(String, String)> {
+    let ts = now_unix();
+    signed_at(
+        id,
+        &abhiverse_protocol::signed_get_message(path, &id.info.device_id, ts),
+        ts,
+    )
+}
+
 #[tokio::test]
 async fn devices_and_transfers_survive_restart() {
     let dir = temp_dir("restart");
@@ -140,11 +149,20 @@ async fn devices_and_transfers_survive_restart() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
     let tid = view["transfer_id"].as_str().unwrap().to_string();
-    // Upload only chunk 0 (raw bytes; controller uploads are unsigned by design,
-    // integrity comes from the declared whole-file hash).
+    // Upload only chunk 0 (signed; the whole-file hash is still
+    // the integrity backstop at complete time).
+    let ts = now_unix();
+    let chunk0_sig = controller.sign(&abhiverse_protocol::chunk_upload_message(
+        &tid,
+        0,
+        &sha256_hex(&data[..CHUNK_SIZE as usize]),
+        ts,
+    ));
     let req = Request::builder()
         .method(Method::PUT)
         .uri(format!("/transfers/{tid}/chunks/0"))
+        .header("x-abhiverse-timestamp", ts.to_string())
+        .header("x-abhiverse-signature", chunk0_sig)
         .body(Body::from(data[..CHUNK_SIZE as usize].to_vec()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -160,21 +178,31 @@ async fn devices_and_transfers_survive_restart() {
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0]["info"]["device_id"], agent.info.device_id);
 
+    let get_path = format!("/transfers/{tid}?as={}", controller.info.device_id);
     let (_, view) = call(
         app.clone(),
         Method::GET,
-        &format!("/transfers/{tid}"),
+        &get_path,
         None,
-        vec![],
+        signed_get(&controller, &get_path),
     )
     .await;
     assert_eq!(view["status"], "receiving");
     assert_eq!(view["received_chunks"], json!([0]));
 
-    // Finish the transfer on the new boot: chunk 1 + signed complete.
+    // Finish the transfer on the new boot: chunk 1 (signed) + signed complete.
+    let ts = now_unix();
+    let chunk1_sig = controller.sign(&abhiverse_protocol::chunk_upload_message(
+        &tid,
+        1,
+        &sha256_hex(&data[CHUNK_SIZE as usize..]),
+        ts,
+    ));
     let req = Request::builder()
         .method(Method::PUT)
         .uri(format!("/transfers/{tid}/chunks/1"))
+        .header("x-abhiverse-timestamp", ts.to_string())
+        .header("x-abhiverse-signature", chunk1_sig)
         .body(Body::from(data[CHUNK_SIZE as usize..].to_vec()))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
