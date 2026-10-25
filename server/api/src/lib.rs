@@ -18,19 +18,20 @@ use std::sync::{Arc, Mutex};
 
 use abhiverse_identity::{fingerprint, hex_decode, hex_encode, verify};
 use abhiverse_protocol::{
-    chunk_download_message, chunk_upload_message, now_unix, session_answer_message,
-    session_end_message, session_reject_message, transfer_complete_message,
-    transfer_create_message, AnswerSessionRequest, ClaimPairingRequest, CreatePairingRequest,
-    CreatePairingResponse, CreateSessionRequest, CreateTransferRequest, DeviceInfo,
-    DeviceListResponse, DeviceView, EndSessionRequest, HealthResponse, HeartbeatRequest,
-    IceCandidateListResponse, IceCandidateRequest, IceCandidateView, PairingDecisionRequest,
-    PairingStatus, PairingView, RevokeRequest, RtcConfig, SessionListResponse, SessionStatus,
-    SessionView, TransferListResponse, TransferStatus, TransferView, API_SERVICE_NAME,
+    chunk_download_message, chunk_upload_message, ice_candidate_message, now_unix,
+    session_answer_message, session_end_message, session_reject_message, signed_get_message,
+    transfer_complete_message, transfer_create_message, AnswerSessionRequest, ClaimPairingRequest,
+    CreatePairingRequest, CreatePairingResponse, CreateSessionRequest, CreateTransferRequest,
+    DeviceInfo, DeviceListResponse, DeviceView, EndSessionRequest, HealthResponse,
+    HeartbeatRequest, IceCandidateListResponse, IceCandidateRequest, IceCandidateView,
+    PairingDecisionRequest, PairingStatus, PairingView, RevokeRequest, RtcConfig,
+    SessionListResponse, SessionStatus, SessionView, TransferListResponse, TransferStatus,
+    TransferView, API_SERVICE_NAME,
 };
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Json, Router,
@@ -41,6 +42,13 @@ use serde::{Deserialize, Serialize};
 const PAIRING_TTL_SECS: i64 = 300;
 const ONLINE_WINDOW_SECS: i64 = 30;
 const MAX_CLOCK_SKEW_SECS: i64 = 120;
+/// Cap on pending (unclaimed) pairing sessions: pairing create is
+/// unauthenticated by necessity (the device is unknown before
+/// pairing), so the pending set is bounded and pruned instead.
+const MAX_PENDING_PAIRINGS: usize = 100;
+/// Completed/failed transfers (and their relay chunk files) are
+/// pruned after this long, so relay disk cannot grow without bound.
+const TRANSFER_RETENTION_SECS: i64 = 7 * 24 * 3600;
 
 #[derive(Clone)]
 struct Session {
@@ -75,6 +83,7 @@ struct TransferRec {
     received: BTreeSet<u32>,
     status: TransferStatus,
     from_is_agent: bool,
+    created_at: i64,
 }
 
 #[derive(Default)]
@@ -113,6 +122,8 @@ struct PersistedTransfer {
     received: Vec<u32>,
     status: TransferStatus,
     from_is_agent: bool,
+    #[serde(default)]
+    created_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -159,6 +170,7 @@ impl Store {
                             received: r.received.iter().copied().collect(),
                             status: r.status,
                             from_is_agent: r.from_is_agent,
+                            created_at: r.created_at,
                         },
                     )
                 })
@@ -216,6 +228,7 @@ impl Store {
                     received: r.received.into_iter().collect(),
                     status: r.status,
                     from_is_agent: r.from_is_agent,
+                    created_at: r.created_at,
                 },
             );
         }
@@ -297,6 +310,15 @@ pub fn build_app_with_paths(state_file: Option<PathBuf>, chunk_dir: PathBuf) -> 
         replay: Arc::new(Mutex::new(std::collections::HashMap::new())),
         claim_failures: Arc::new(Mutex::new(Vec::new())),
     });
+    // Intentionally unauthenticated surface (every other endpoint
+    // verifies a device/controller signature):
+    // - GET /health: version string only.
+    // - GET /devices: device names + presence (discovery for an
+    //   unpaired phone; no keys, files, or session material).
+    // - POST /pairing/requests + GET /pairing/{id}: pre-pairing
+    //   capability — the device is unknown before pairing, so these
+    //   cannot be signed; the pending set is capped and pruned, and
+    //   a claim still needs the terminal approval on the laptop.
     Router::new()
         .route("/health", get(health))
         .route("/pairing/requests", post(create_pairing))
@@ -396,12 +418,27 @@ async fn create_pairing(
         status: PairingStatus::Pending,
         expires_at,
     };
-    store
-        .store
-        .lock()
-        .unwrap()
-        .sessions
-        .insert(pairing_id.clone(), session);
+    {
+        let mut store = store.store.lock().unwrap();
+        // Prune expired sessions first, then bound the pending set:
+        // pairing create is unauthenticated by necessity (the device
+        // is unknown before pairing), so an unbounded map would be a
+        // memory-exhaustion vector.
+        let now = now_unix();
+        store.sessions.retain(|_, s| s.expires_at > now);
+        let pending = store
+            .sessions
+            .values()
+            .filter(|s| s.status == PairingStatus::Pending)
+            .count();
+        if pending >= MAX_PENDING_PAIRINGS {
+            return err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many pending pairing requests",
+            );
+        }
+        store.sessions.insert(pairing_id.clone(), session);
+    }
     (
         StatusCode::CREATED,
         Json(CreatePairingResponse {
@@ -681,7 +718,7 @@ fn signature_error(
     if !check_timestamp(ts) {
         return Some(err(
             StatusCode::BAD_REQUEST,
-            "signature timestamp outside allowed window",
+            "signature timestamp outside allowed window - check that both devices' clocks are in sync (within 2 minutes)",
         ));
     }
     let Some(sig) = header(headers, "x-abhiverse-signature") else {
@@ -697,6 +734,84 @@ fn signature_error(
         return Some(err(
             StatusCode::UNAUTHORIZED,
             "replayed request: this signature was already used",
+        ));
+    }
+    None
+}
+
+/// Look up the live public key for a caller id: a paired device's own
+/// key, or its paired controller's key. Revoked devices (and their
+/// controllers) resolve to nothing, so revocation locks out reads too.
+fn caller_key(store: &Store, caller_id: &str) -> Option<String> {
+    if let Some(d) = store.devices.get(caller_id) {
+        if d.revoked {
+            return None;
+        }
+        return Some(d.info.public_key.clone());
+    }
+    store
+        .devices
+        .values()
+        .find(|d| !d.revoked && d.controller_info.device_id == caller_id)
+        .map(|d| d.controller_info.public_key.clone())
+}
+
+/// Caller is the device itself or its paired counterpart.
+fn counterpart_or_self(store: &Store, caller_id: &str, device_id: &str) -> bool {
+    if caller_id == device_id {
+        return true;
+    }
+    if let Some(d) = store.devices.get(device_id) {
+        if !d.revoked && d.controller_info.device_id == caller_id {
+            return true;
+        }
+    }
+    if let Some(d) = store.devices.get(caller_id) {
+        if !d.revoked && d.controller_info.device_id == device_id {
+            return true;
+        }
+    }
+    false
+}
+
+/// Verify a signed GET: timestamp window + signature over
+/// `signed_get_message(path_and_query, caller, ts)`. Unlike
+/// `signature_error`, this does NOT record the signature for replay
+/// protection: GETs are idempotent reads, and polling loops hit the
+/// same second twice, which would false-positive as replays. The
+/// 120 s timestamp window still bounds any replayed read.
+fn verify_get_signature(
+    state: &Shared,
+    headers: &HeaderMap,
+    path_and_query: &str,
+    caller_id: &str,
+) -> Option<Response> {
+    let store = state.store.lock().unwrap();
+    let Some(pk) = caller_key(&store, caller_id) else {
+        return Some(err(StatusCode::UNAUTHORIZED, "unknown or revoked caller"));
+    };
+    drop(store);
+    let Some(ts) = header(headers, "x-abhiverse-timestamp").and_then(|v| v.parse::<i64>().ok())
+    else {
+        return Some(err(
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid signature timestamp",
+        ));
+    };
+    if !check_timestamp(ts) {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "signature timestamp outside allowed window - check that both devices' clocks are in sync (within 2 minutes)",
+        ));
+    }
+    let Some(sig) = header(headers, "x-abhiverse-signature") else {
+        return Some(err(StatusCode::UNAUTHORIZED, "missing signature"));
+    };
+    let message = signed_get_message(path_and_query, caller_id, ts);
+    if !verify(&pk, &message, &sig) {
+        return Some(err(
+            StatusCode::UNAUTHORIZED,
+            "signature does not match device key",
         ));
     }
     None
@@ -805,6 +920,7 @@ async fn create_transfer(
         received: BTreeSet::new(),
         status: TransferStatus::Receiving,
         from_is_agent,
+        created_at: now_unix(),
     };
     let view = transfer_view(&transfer_id, &rec);
     {
@@ -815,30 +931,67 @@ async fn create_transfer(
     (StatusCode::CREATED, Json(view)).into_response()
 }
 
-#[derive(serde::Deserialize)]
-struct ForQuery {
-    #[serde(rename = "for")]
-    recipient: Option<String>,
-}
-
 async fn list_transfers(
     State(state): State<Shared>,
-    Query(q): Query<ForQuery>,
-) -> Json<TransferListResponse> {
-    let store = state.store.lock().unwrap();
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<ParticipantQuery>,
+) -> Response {
+    let caller = q.participant.as_deref().unwrap_or("");
+    let Some(for_id) = q.recipient.as_deref() else {
+        return err(StatusCode::BAD_REQUEST, "missing for=device_id");
+    };
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    if let Some(resp) = verify_get_signature(&state, &headers, path_and_query, caller) {
+        return resp;
+    }
+    let mut store = state.store.lock().unwrap();
+    if !counterpart_or_self(&store, caller, for_id) {
+        return err(StatusCode::FORBIDDEN, "not authorized for this device");
+    }
+    // Retention prune: drop week-old records and their relay chunk
+    // files, so completed transfers cannot fill relay disk.
+    let now = now_unix();
+    let mut doomed = Vec::new();
+    store.transfers.retain(|id, r| {
+        let keep = now - r.created_at <= TRANSFER_RETENTION_SECS;
+        if !keep {
+            doomed.push(id.clone());
+        }
+        keep
+    });
+    for id in doomed {
+        let _ = std::fs::remove_file(abhiverse_file_transfer::part_path(&state.chunk_dir, &id));
+    }
     let transfers = store
         .transfers
         .iter()
-        .filter(|(_, rec)| q.recipient.as_deref().is_none_or(|r| r == rec.to_id))
+        .filter(|(_, rec)| rec.to_id == for_id)
         .map(|(id, rec)| transfer_view(id, rec))
         .collect();
-    Json(TransferListResponse { transfers })
+    Json(TransferListResponse { transfers }).into_response()
 }
 
-async fn get_transfer(State(state): State<Shared>, Path(id): Path<String>) -> Response {
+async fn get_transfer(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Query(q): Query<ParticipantQuery>,
+) -> Response {
+    let caller = q.participant.as_deref().unwrap_or("");
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    if let Some(resp) = verify_get_signature(&state, &headers, path_and_query, caller) {
+        return resp;
+    }
     let store = state.store.lock().unwrap();
     match store.transfers.get(&id) {
-        Some(rec) => Json(transfer_view(&id, rec)).into_response(),
+        Some(rec) => {
+            if caller != rec.from_id && caller != rec.to_id {
+                return err(StatusCode::FORBIDDEN, "not a party to this transfer");
+            }
+            Json(transfer_view(&id, rec)).into_response()
+        }
         None => err(StatusCode::NOT_FOUND, "unknown transfer"),
     }
 }
@@ -864,15 +1017,24 @@ async fn upload_chunk(
             return err(StatusCode::BAD_REQUEST, "chunk has wrong length");
         }
         if rec.from_is_agent {
-            store
-                .devices
-                .get(&rec.from_id)
-                .map(|d| d.info.public_key.clone())
+            caller_key(&store, &rec.from_id)
         } else {
-            None
+            // Controller senders sign too (they have keys since Task
+            // 007); the v0.3 unsigned-controller exception is closed.
+            store.devices.get(&rec.to_id).and_then(|d| {
+                if d.revoked {
+                    None
+                } else {
+                    Some(d.controller_info.public_key.clone())
+                }
+            })
         }
     };
-    if let Some(pk) = from_pk {
+    let Some(pk) = from_pk else {
+        return err(StatusCode::UNAUTHORIZED, "unknown sender key");
+    };
+    {
+        // pk verified above; this block runs only for a known key
         let chunk_hash = abhiverse_file_transfer::sha256_hex(&body);
         let ts = header(&headers, "x-abhiverse-timestamp")
             .and_then(|v| v.parse::<i64>().ok())
@@ -911,15 +1073,17 @@ async fn download_chunk(
         if !rec.received.contains(&index) {
             return err(StatusCode::NOT_FOUND, "chunk not uploaded yet");
         }
-        let pk = store
-            .devices
-            .get(&rec.to_id)
-            .map(|d| d.info.public_key.clone());
+        let pk = caller_key(&store, &rec.to_id);
         (rec.clone(), pk)
     };
-    // Agent recipients must sign; controller recipients use the
-    // (unguessable) transfer ID as the capability in v0.3.
-    if let Some(pk) = recipient_pk {
+    // Every recipient must sign. v0.3 let controller recipients use
+    // the transfer id as a bearer capability; controllers have had
+    // keys since Task 007, so that exception is closed.
+    let Some(pk) = recipient_pk else {
+        return err(StatusCode::UNAUTHORIZED, "unknown transfer recipient");
+    };
+    {
+        // pk verified above; this block runs only for a known key
         let ts = header(&headers, "x-abhiverse-timestamp")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
@@ -959,16 +1123,25 @@ async fn complete_transfer(
             return err(StatusCode::NOT_FOUND, "unknown transfer");
         };
         let pk = if rec.from_is_agent {
-            store
-                .devices
-                .get(&rec.from_id)
-                .map(|d| d.info.public_key.clone())
+            caller_key(&store, &rec.from_id)
         } else {
-            None
+            // Controller completers sign too (they have keys since
+            // Task 007); the v0.3 unsigned-controller exception is closed.
+            store.devices.get(&rec.to_id).and_then(|d| {
+                if d.revoked {
+                    None
+                } else {
+                    Some(d.controller_info.public_key.clone())
+                }
+            })
         };
         (rec.clone(), pk)
     };
-    if let Some(pk) = from_pk {
+    let Some(pk) = from_pk else {
+        return err(StatusCode::UNAUTHORIZED, "unknown sender key");
+    };
+    {
+        // pk verified below; this block runs only for a known key
         let ts = header(&headers, "x-abhiverse-timestamp")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
@@ -1019,13 +1192,26 @@ async fn complete_transfer(
 
 const SESSION_TTL_SECS: i64 = 120;
 
-async fn rtc_config() -> Json<RtcConfig> {
+async fn rtc_config(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<ParticipantQuery>,
+) -> Response {
+    // TURN credentials mint relay access: only a paired device or
+    // its controller may fetch them.
+    let caller = q.participant.as_deref().unwrap_or("");
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    if let Some(resp) = verify_get_signature(&state, &headers, path_and_query, caller) {
+        return resp;
+    }
     if let Ok(raw) = std::env::var("ABHIVERSE_ICE_SERVERS_JSON") {
         if let Ok(servers) = serde_json::from_str::<Vec<abhiverse_protocol::IceServerConfig>>(&raw)
         {
             return Json(RtcConfig {
                 ice_servers: servers,
-            });
+            })
+            .into_response();
         }
     }
     // Ephemeral TURN credentials (coturn `--use-auth-secret`): when a
@@ -1046,10 +1232,11 @@ async fn rtc_config() -> Json<RtcConfig> {
             servers.push(mint_turn_server(&secret, urls, now_unix()));
             return Json(RtcConfig {
                 ice_servers: servers,
-            });
+            })
+            .into_response();
         }
     }
-    Json(RtcConfig::default_stun())
+    Json(RtcConfig::default_stun()).into_response()
 }
 
 const TURN_CREDENTIAL_TTL_SECS: i64 = 3600;
@@ -1153,12 +1340,28 @@ async fn create_session(
         next_seq: 1,
     };
     let view = rd_view(&session_id, &rec);
-    state
-        .store
-        .lock()
-        .unwrap()
-        .rd_sessions
-        .insert(session_id, rec);
+    {
+        let mut store = state.store.lock().unwrap();
+        // Prune day-old sessions (no live viewer polls a day-old
+        // session), then allow at most one live offer per device:
+        // without the cap, a paired controller could flood the
+        // laptop's terminal with approval prompts.
+        let now = now_unix();
+        store
+            .rd_sessions
+            .retain(|_, r| now - r.created_at <= 24 * 3600);
+        if store
+            .rd_sessions
+            .values()
+            .any(|r| r.device_id == rec.device_id && r.status == SessionStatus::Offered)
+        {
+            return err(
+                StatusCode::CONFLICT,
+                "a session offer is already pending for this device",
+            );
+        }
+        store.rd_sessions.insert(session_id, rec);
+    }
     (StatusCode::CREATED, Json(view)).into_response()
 }
 
@@ -1173,26 +1376,50 @@ struct ParticipantQuery {
 
 async fn list_sessions(
     State(state): State<Shared>,
+    headers: HeaderMap,
+    uri: Uri,
     Query(q): Query<ParticipantQuery>,
-) -> Json<SessionListResponse> {
+) -> Response {
+    let caller = q.participant.as_deref().unwrap_or("");
+    let Some(for_id) = q.recipient.as_deref() else {
+        return err(StatusCode::BAD_REQUEST, "missing for=device_id");
+    };
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    if let Some(resp) = verify_get_signature(&state, &headers, path_and_query, caller) {
+        return resp;
+    }
     let mut store = state.store.lock().unwrap();
+    if !counterpart_or_self(&store, caller, for_id) {
+        return err(StatusCode::FORBIDDEN, "not authorized for this device");
+    }
+    let now = now_unix();
+    store
+        .rd_sessions
+        .retain(|_, r| now - r.created_at <= 24 * 3600);
     let sessions = store
         .rd_sessions
         .iter_mut()
-        .filter(|(_, rec)| q.recipient.as_deref().is_none_or(|r| r == rec.device_id))
+        .filter(|(_, rec)| rec.device_id == for_id)
         .map(|(id, rec)| {
             refresh_rd_expiry(rec);
             rd_view(id, rec)
         })
         .collect();
-    Json(SessionListResponse { sessions })
+    Json(SessionListResponse { sessions }).into_response()
 }
 
 async fn get_session(
     State(state): State<Shared>,
+    headers: HeaderMap,
+    uri: Uri,
     Path(id): Path<String>,
     Query(q): Query<ParticipantQuery>,
 ) -> Response {
+    let caller = q.participant.as_deref().unwrap_or("");
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    if let Some(resp) = verify_get_signature(&state, &headers, path_and_query, caller) {
+        return resp;
+    }
     let mut store = state.store.lock().unwrap();
     let Some(rec) = store.rd_sessions.get_mut(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown session");
@@ -1284,17 +1511,48 @@ async fn reject_session(
 
 async fn post_ice(
     State(state): State<Shared>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<IceCandidateRequest>,
 ) -> Response {
+    // Resolve the poster's key and the session state first, then
+    // verify the signature without holding the store lock (the
+    // verifier locks it again for replay bookkeeping).
+    let (pk, closed) = {
+        let mut store = state.store.lock().unwrap();
+        let Some(rec) = store.rd_sessions.get_mut(&id) else {
+            return err(StatusCode::NOT_FOUND, "unknown session");
+        };
+        refresh_rd_expiry(rec);
+        if req.from_id != rec.device_id && req.from_id != rec.controller_id {
+            return err(StatusCode::FORBIDDEN, "not a participant of this session");
+        }
+        let closed = matches!(
+            rec.status,
+            SessionStatus::Ended | SessionStatus::Rejected | SessionStatus::Expired
+        );
+        (caller_key(&store, &req.from_id), closed)
+    };
+    if closed {
+        return err(StatusCode::CONFLICT, "session is closed");
+    }
+    let Some(pk) = pk else {
+        return err(StatusCode::UNAUTHORIZED, "unknown or revoked participant");
+    };
+    // The poster must prove possession of its device key: otherwise
+    // anyone who learns a session id could inject ICE candidates.
+    let candidate_hash = abhiverse_file_transfer::sha256_hex(req.candidate.as_bytes());
+    let ts = header(&headers, "x-abhiverse-timestamp")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let message = ice_candidate_message(&id, &req.from_id, &candidate_hash, ts);
+    if let Some(resp) = signature_error(&state, &headers, &pk, &message) {
+        return resp;
+    }
     let mut store = state.store.lock().unwrap();
     let Some(rec) = store.rd_sessions.get_mut(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown session");
     };
-    refresh_rd_expiry(rec);
-    if req.from_id != rec.device_id && req.from_id != rec.controller_id {
-        return err(StatusCode::FORBIDDEN, "not a participant of this session");
-    }
     if matches!(
         rec.status,
         SessionStatus::Ended | SessionStatus::Rejected | SessionStatus::Expired
@@ -1315,9 +1573,16 @@ async fn post_ice(
 
 async fn get_ice(
     State(state): State<Shared>,
+    headers: HeaderMap,
+    uri: Uri,
     Path(id): Path<String>,
     Query(q): Query<ParticipantQuery>,
 ) -> Response {
+    let caller = q.participant.as_deref().unwrap_or("");
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("");
+    if let Some(resp) = verify_get_signature(&state, &headers, path_and_query, caller) {
+        return resp;
+    }
     let store = state.store.lock().unwrap();
     let Some(rec) = store.rd_sessions.get(&id) else {
         return err(StatusCode::NOT_FOUND, "unknown session");
@@ -1342,23 +1607,23 @@ async fn end_session(
     headers: HeaderMap,
     Json(req): Json<EndSessionRequest>,
 ) -> Response {
-    let (device_id, controller_id, device_pk) = {
+    let (device_id, controller_id, ender_pk) = {
         let store = state.store.lock().unwrap();
         let Some(rec) = store.rd_sessions.get(&id) else {
             return err(StatusCode::NOT_FOUND, "unknown session");
         };
-        let pk = store
-            .devices
-            .get(&rec.device_id)
-            .map(|d| d.info.public_key.clone());
+        // Both sides sign their end request: previously only the
+        // device side was verified, so anyone who learned a session
+        // id could kill a live session by posing as the controller.
+        let pk = caller_key(&store, &req.from_id);
         (rec.device_id.clone(), rec.controller_id.clone(), pk)
     };
     if req.from_id != device_id && req.from_id != controller_id {
         return err(StatusCode::FORBIDDEN, "not a participant of this session");
     }
-    if req.from_id == device_id {
-        let Some(pk) = device_pk else {
-            return err(StatusCode::NOT_FOUND, "session device no longer exists");
+    {
+        let Some(pk) = ender_pk else {
+            return err(StatusCode::UNAUTHORIZED, "unknown or revoked participant");
         };
         let ts = header(&headers, "x-abhiverse-timestamp")
             .and_then(|v| v.parse::<i64>().ok())
