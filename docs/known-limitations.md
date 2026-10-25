@@ -23,6 +23,11 @@ dev sandbox allows, but still await the real-device run in
   dashboard is future work).
 - Stream quality tops out at 640×360 / 10 fps (adaptive tiers go
   down from there); no audio, no multi-monitor selection.
+- No power controls yet (sleep/lock/restart/shutdown from the
+  phone), no clipboard sync, no LAN auto-discovery (the server
+  address is set in the app's settings), no file browsing on the
+  laptop — these are the top competitor-parity items on the
+  roadmap (see PITCH.md).
 - Every transfer chunk upload/download, session read, ICE trickle
   and RTC-config fetch is signed by the sending device/controller
   (closed 2026-10-25: previously controller uploads/downloads and
