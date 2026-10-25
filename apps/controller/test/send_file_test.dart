@@ -1,11 +1,12 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:abhiverse_controller/core/api_client.dart';
 import 'package:abhiverse_controller/core/config.dart';
 import 'package:abhiverse_controller/core/health_client.dart';
 import 'package:abhiverse_controller/main.dart';
 import 'package:crypto/crypto.dart';
+import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -24,30 +25,29 @@ Map<String, dynamic> transferJson(String status) => {
   'status': status,
 };
 
+class _FakeFileSelector extends FileSelectorPlatform {
+  @override
+  Future<XFile?> openFile({
+    List<XTypeGroup>? acceptedTypeGroups,
+    String? initialDirectory,
+    String? confirmButtonText,
+  }) async {
+    return XFile.fromData(
+      Uint8List.fromList(utf8.encode('hi')),
+      path: 'hello.txt',
+    );
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  // Mock the file_picker platform channel: file_picker 11 invokes
-  // the file-type name ('any') and returns a list of file maps.
-  // Picking returns one small in-memory file.
-  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-      .setMockMethodCallHandler(
-        const MethodChannel('miguelruivo.flutter.plugins.filepicker'),
-        (call) async {
-          if (call.method == 'any') {
-            return [
-              {
-                'name': 'hello.txt',
-                'bytes': Uint8List.fromList(utf8.encode('hi')),
-                'size': 2,
-                'path': null,
-                'identifier': null,
-              },
-            ];
-          }
-          return null;
-        },
-      );
+  // Fake the picker at the platform-interface level: picking returns one
+  // small in-memory file. (A method-channel mock would force the dialog's
+  // XFile.readAsBytes through real dart:io I/O, which widget tests cannot
+  // complete without runAsync; the in-memory XFile keeps the test on the
+  // fake-async path while exercising the same dialog code.)
+  FileSelectorPlatform.instance = _FakeFileSelector();
 
   testWidgets('pick a real file and send it end to end', (tester) async {
     final health = HealthClient(
