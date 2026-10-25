@@ -15,7 +15,9 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
 
 /// HTTP client for control-plane calls: a 10 s timeout, so a hung
 /// connection can never stall the heartbeat/pairing loops forever
-/// (previously bare `ureq` calls had no timeout at all).
+/// (previously bare `ureq` calls had no timeout at all). TLS is
+/// enabled in Cargo.toml, so this client works against https APIs —
+/// a requirement for any hosted (non-LAN) setup.
 fn http_client() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(10))
