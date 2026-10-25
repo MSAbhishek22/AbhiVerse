@@ -116,4 +116,51 @@ String newRequestId() {
 String revokeMessage({required String deviceId, required int timestamp}) =>
     'abhiverse-revoke:$deviceId:$timestamp';
 
+/// Signed-GET message (mirror of Rust `signed_get_message`): the
+/// caller signs the exact path + query it sends, so a signed read
+/// cannot be transplanted onto another resource.
+String signedGetMessage({
+  required String pathAndQuery,
+  required String callerId,
+  required int timestamp,
+}) =>
+    'abhiverse-get:$pathAndQuery:$callerId:$timestamp';
+
+/// ICE trickle message (mirror of Rust `ice_candidate_message`).
+String iceCandidateMessage({
+  required String sessionId,
+  required String fromId,
+  required String candidateSha256Hex,
+  required int timestamp,
+}) =>
+    'abhiverse-ice:$sessionId:$fromId:$candidateSha256Hex:$timestamp';
+
+/// Chunk upload/download messages (mirror of Rust).
+String chunkUploadMessage({
+  required String transferId,
+  required int index,
+  required String chunkSha256Hex,
+  required int timestamp,
+}) =>
+    'abhiverse-chunk:$transferId:$index:$chunkSha256Hex:$timestamp';
+
+String chunkDownloadMessage({
+  required String transferId,
+  required int index,
+  required int timestamp,
+}) =>
+    'abhiverse-download:$transferId:$index:$timestamp';
+
+String transferCompleteMessage({
+  required String transferId,
+  required int timestamp,
+}) =>
+    'abhiverse-transfer-complete:$transferId:$timestamp';
+
+String sessionEndMessage({
+  required String sessionId,
+  required int timestamp,
+}) =>
+    'abhiverse-session-end:$sessionId:$timestamp';
+
 int nowUnix() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
