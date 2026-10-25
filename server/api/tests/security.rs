@@ -8,7 +8,7 @@ use abhiverse_file_transfer::sha256_hex;
 use abhiverse_identity::{ensure_identity, DeviceIdentity};
 use abhiverse_protocol::{
     heartbeat_message, now_unix, pairing_approve_message, revoke_message, session_answer_message,
-    session_create_message, transfer_create_message, DeviceKind,
+    session_create_message, signed_get_message, transfer_create_message, DeviceKind,
 };
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -49,6 +49,11 @@ fn signed_at(id: &DeviceIdentity, message: &str, ts: i64) -> Vec<(String, String
         ("x-abhiverse-timestamp".into(), ts.to_string()),
         ("x-abhiverse-signature".into(), id.sign(message)),
     ]
+}
+
+fn signed_get(id: &DeviceIdentity, path: &str) -> Vec<(String, String)> {
+    let ts = now_unix();
+    signed_at(id, &signed_get_message(path, &id.info.device_id, ts), ts)
 }
 
 fn identity(tag: &str, name: &str, kind: DeviceKind) -> DeviceIdentity {
@@ -263,18 +268,24 @@ async fn revoke_ends_active_session() {
     .await;
     assert_eq!(s, StatusCode::OK);
 
-    // The session is now Ended for both participants, and no new
-    // ICE can be added to it.
-    let (s, view) = call(
+    // Revocation locks both parties out of reads, and the session
+    // is closed: no new ICE can be added to it. The CONFLICT below
+    // is what proves revoke marked it terminal — the session was
+    // Answered, so only revoke could have closed it.
+    let get_path = format!("/sessions/{sid}?as={}", controller.info.device_id);
+    let (s, _) = call(
         app.clone(),
         Method::GET,
-        &format!("/sessions/{sid}?as={}", controller.info.device_id),
+        &get_path,
         None,
-        vec![],
+        signed_get(&controller, &get_path),
     )
     .await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(view["status"], "ended", "revoke must end the live session");
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "revoked parties cannot read sessions"
+    );
     let (s, _) = call(
         app.clone(),
         Method::POST,
