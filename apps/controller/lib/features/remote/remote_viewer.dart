@@ -35,6 +35,8 @@ class _RemoteViewerPageState extends State<RemoteViewerPage> {
   bool _answerApplied = false;
   bool _videoLive = false;
   bool _closing = false;
+  bool _connectionFailed = false;
+  bool _rendererReady = false;
   int _iceAfter = 0;
   Timer? _poll;
   DateTime _lastMoveSent = DateTime.fromMillisecondsSinceEpoch(0);
@@ -50,7 +52,10 @@ class _RemoteViewerPageState extends State<RemoteViewerPage> {
 
   Future<void> _start() async {
     try {
-      await _renderer.initialize();
+      if (!_rendererReady) {
+        await _renderer.initialize();
+        _rendererReady = true;
+      }
       final iceServers = await api.fetchRtcConfig();
       final pc = await createPeerConnection({
         'iceServers': [
@@ -94,6 +99,31 @@ class _RemoteViewerPageState extends State<RemoteViewerPage> {
               sdpMlineIndex: candidate.sdpMLineIndex,
             )
             .catchError((_) {});
+      };
+      // Previously a failed ICE connection left the viewer on
+      // "Approved — connecting…" + spinner forever, with no error
+      // and no way out. Surface the failure and offer a retry.
+      pc.onConnectionState = (state) {
+        if (!mounted || _closing) return;
+        if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+          setState(() {
+            _connectionFailed = true;
+            _status =
+                'Connection failed — the network could not connect. Check Wi-Fi/mobile data and try again (strict networks may need a TURN relay).';
+          });
+        } else if (state ==
+            RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+          setState(() {
+            _connectionFailed = true;
+            _status = 'Connection lost.';
+          });
+        } else if (state ==
+            RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+          setState(() {
+            _connectionFailed = false;
+            _status = 'Connected';
+          });
+        }
       };
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -177,6 +207,34 @@ class _RemoteViewerPageState extends State<RemoteViewerPage> {
     if (mounted) setState(() => _status = message);
   }
 
+  /// End the failed session (if any), reset the peer connection,
+  /// and start over with a fresh session offer.
+  Future<void> _retry() async {
+    final sid = _sessionId;
+    if (sid != null) {
+      try {
+        await api.endSession(sid);
+      } catch (_) {}
+    }
+    _poll?.cancel();
+    _poll = null;
+    await _pc?.close();
+    _pc = null;
+    _input = null;
+    _sessionId = null;
+    _answerApplied = false;
+    _videoLive = false;
+    _iceAfter = 0;
+    _renderer.srcObject = null;
+    if (mounted) {
+      setState(() {
+        _connectionFailed = false;
+        _status = 'Preparing…';
+      });
+    }
+    await _start();
+  }
+
   Future<void> _endAndPop() async {
     _closing = true;
     _poll?.cancel();
@@ -217,7 +275,17 @@ class _RemoteViewerPageState extends State<RemoteViewerPage> {
         children: [
           Padding(
             padding: const EdgeInsets.all(8),
-            child: Text(_status, textAlign: TextAlign.center),
+            child: Column(
+              children: [
+                Text(_status, textAlign: TextAlign.center),
+                if (_connectionFailed)
+                  TextButton.icon(
+                    onPressed: _retry,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry'),
+                  ),
+              ],
+            ),
           ),
           Expanded(
             child: LayoutBuilder(
@@ -249,9 +317,13 @@ class _RemoteViewerPageState extends State<RemoteViewerPage> {
                             objectFit:
                                 RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
                           )
-                        : const Center(
-                            child: CircularProgressIndicator(),
-                          ),
+                        : _connectionFailed
+                            ? const Center(
+                                child: Icon(Icons.signal_wifi_off, size: 48),
+                              )
+                            : const Center(
+                                child: CircularProgressIndicator(),
+                              ),
                   ),
                 );
               },
