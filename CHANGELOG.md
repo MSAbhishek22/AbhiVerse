@@ -26,6 +26,14 @@ investor, competitor):
   the app version. The Terms state liability bluntly: approving the
   wrong device, exposing a server without HTTPS, or ignoring the
   cleartext warning is the user's fault, not the app's.
+- Anywhere-over-the-internet, for real: the agent's HTTP client
+  now enables TLS, so `--pair --api https://…` works — previously
+  pairing, heartbeats, and transfers could only ever reach a
+  LAN/localhost API, which is what made "same Wi-Fi" feel like a
+  product limit. New `docs/remote-access.md` covers the VPS path
+  (Caddy + coturn, the only path with a TURN fallback) and the
+  no-VPS Cloudflare Tunnel path (STUN-only media), plus the rule
+  that both sides must use the same API URL.
   with a 1 GB client-side guard matching the
   server cap and chunk progress as before.
 - **In-app server settings.** The API URL is no longer
