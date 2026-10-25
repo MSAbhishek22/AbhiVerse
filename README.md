@@ -1,108 +1,120 @@
-# ABHIVERSE
+# 🌉 ABHIVERSE
 
-**Your devices. One ecosystem. Total control.**
+[![CI](https://github.com/MSAbhishek22/AbhiVerse/actions/workflows/ci.yml/badge.svg)](https://github.com/MSAbhishek22/AbhiVerse/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/MSAbhishek22/AbhiVerse?include_prereleases&label=pre-release)](https://github.com/MSAbhishek22/AbhiVerse/releases)
+[![Platform](https://img.shields.io/badge/Platform-Android%20%2B%20Windows-blue.svg)](https://msabhishek22.github.io/AbhiVerse/)
 
-An open-source platform for securely connecting, accessing and
-managing your own devices from anywhere — a personal control centre
-for your phone, laptop and tablet, across operating systems and
-across networks.
+**Your phone is the remote for your laptop. From anywhere. No account. No subscription. No trackers.**
 
-> **Status: v0.5.4 — production hardening (pre-release).**
-> All API reads and mutations are signed by the calling device or
-> controller (see `SECURITY.md`); the release blocker remains the
-> real-device run on physical hardware.
-> Device identity (Ed25519) for agents *and* controllers, pairing
-> with signed approval (code or QR), presence, revocation signed by
-> either side, chunked file transfer with SHA-256 integrity and
-> resume, persistent API state, and remote desktop: WebRTC
-> signalling with signed requests/answers, H.264 screen streaming
-> (DXGI capture on Windows), `SendInput` injection behind an
-> explicit agent flag, and a Flutter viewer with touch/keyboard
-> input. Media/input verification on real hardware is the remaining
-> step — the dev sandbox blocks UDP; see `docs/remote-desktop.md`.
+> **Status: v0.5.4 — beta pre-release.** Rust 51/51 tests, Flutter 42 tests + 1 skipped, CI green
+> (Rust, Windows target, Flutter, Android). The one honest gap: the first real-device run — WebRTC
+> media, screen capture, and input on physical hardware — is still the release blocker.
+> See [`docs/real-device-test.md`](docs/real-device-test.md) and
+> [`docs/known-limitations.md`](docs/known-limitations.md). Everything below marked ✅ runs;
+> anything else is labelled, not hidden.
 
-## Docs
+## 💡 Why does this exist? A story you already know
 
-- `docs/real-device-setup.md` — build & run on a real laptop + phone
-- `docs/real-device-test.md` — the validation test matrix (release blocker)
-- `docs/known-limitations.md` — the honest list, incl. what is not yet verified on hardware
-- `docs/release.md` — how a version ships (tags, artifacts, checksums, manual GitHub steps)
-- `docs/threat-model.md` — security model + the v0.5.2 review
-- `docs/turn.md` — TURN deployment, incl. short-lived credentials
+You are in the market. Your laptop is at home. You need a file from it — or you need to check
+something on its screen, or start something on it before you get back.
 
-## What exists today
+Right now your options are:
 
-| Component | Path | State |
-|---|---|---|
-| Coordination API (Rust + Axum) | `server/api` | Health, pairing, presence, revocation, file-transfer and remote-desktop signalling endpoints; binds to localhost; optional persistent state via `ABHIVERSE_STATE_FILE`, chunk store on disk; verifies agent *and* controller signatures |
-| Windows agent (Rust) | `agents/windows` | Device identity, `--pair` flow with QR code + on-device approval, signed heartbeats, `--send-file` / `--receive`, `--remote` WebRTC sessions (approval prompt, H.264 screen stream via DXGI, session banner), `--allow-input` to enable `SendInput` injection, `--revoke` |
-| Android controller (Flutter) | `apps/controller` | Own Ed25519 identity in secure storage (signs transfers, session requests, revocations), device list with presence, pairing by code or QR scan, send/download & verify files, remote-desktop viewer with touch + keyboard input, revoke pairing |
-| Shared protocol types | `crates/protocol` | Health, device, pairing, presence, transfer, session and input payloads + canonical signing messages, protocol v1 |
-| Remote input & capture (Rust) | `crates/win-input` | `InputEvent` → platform actions mapping, Windows `SendInput` injection, DXGI desktop duplication capture, BGRA→I420 conversion (Windows code type-checked in CI on the Windows target) |
-| Device identity (Rust) | `crates/identity` | Ed25519 key generation/storage (0600), fingerprint device IDs, sign/verify |
-| File transfer (Rust) | `crates/file-transfer` | 256 KiB chunk plans, SHA-256 integrity, resumable assembly, safe file names |
+- **Apple Continuity / Phone Link** — beautiful, but only if you live entirely inside one
+  company's garden. Apple-to-Apple. Microsoft account to Windows. Your devices, their rules.
+- **AnyDesk / TeamViewer** — powerful, closed-source, subscription-priced, account-gated.
+  You are the product's guest, not its owner.
+- **LocalSend / plain file sharing** — free and simple, but only on the same Wi-Fi. Step out
+  of the house and the magic stops.
+- **Nothing** — for the combination: *my* phone, *my* laptop, *any* network, *no* account,
+  *my* server if I want one.
 
-## Prerequisites
+**Nothing new. Something missing.** Every piece of Abhiverse existed before — pairing codes,
+signed requests, WebRTC video, chunked file transfer. What was missing was all of it in one
+place, open-source, working from the market as well as from the living room, without handing
+your devices to someone else's account system. So it got built.
 
-- Git
-- Rust toolchain (stable): https://rustup.rs
-- Flutter SDK (stable): https://docs.flutter.dev/get-started/install
-- For Android builds: Android Studio or the Android SDK command-line tools
-- For the Windows agent on Windows: Visual Studio Build Tools with
-  the "Desktop development with C++" workload
-
-Check your setup:
-
-```sh
-git --version
-rustc --version
-cargo --version
-flutter doctor
+```mermaid
+flowchart LR
+    Phone["📱 Phone\n(controller app)"] -->|HTTPS · signed requests| API["🖥️ Coordination API\npairing · presence · files · signalling"]
+    API --> Laptop["💻 Laptop\n(agent)"]
+    Phone -.->|WebRTC video + input\nSTUN, or TURN relay| Laptop
 ```
 
-## Run it locally
+One rule makes the whole thing work: **both sides talk to the same API URL.** Same Wi-Fi,
+different cities, phone on mobile data — it does not matter, as long as both sides can reach
+that one URL. See [`docs/remote-access.md`](docs/remote-access.md) for the VPS path and the
+free Cloudflare Tunnel path.
 
-### 1. Coordination API
+## ✨ What you can do today
+
+| From your phone | How it works | Status |
+|---|---|---|
+| See your laptop online | Heartbeat every 10 s, 30 s online window | ✅ |
+| Pair in seconds | 6-digit code or QR scan, approved on the laptop itself | ✅ |
+| Send / receive files | 256 KiB chunks, SHA-256 verified, resumable, 1 GiB cap | ✅ |
+| Watch the laptop screen | WebRTC + H.264 (DXGI capture), adaptive quality tiers | ✅ code, ⏳ first real-device run |
+| Move the mouse, type | `SendInput` injection, behind an explicit agent flag | ✅ code, ⏳ first real-device run |
+| Revoke instantly | Signed revoke from either side, kills live sessions too | ✅ |
+| Change server, read the docs | In-app Settings hub: Terms, Privacy & Security, FAQ, licences, Support, About | ✅ |
+
+## 🙅 What it is NOT (yet)
+
+- Not notifications/calls mirroring — this is a **control centre** (presence, files, remote
+  desktop), not a Phone Link clone feature-for-feature.
+- Not a Play Store app yet — the Android build is a debug-signed APK from CI (sideload only).
+- Not verified on real hardware yet — media, capture, and input await the real-device run.
+- Not power controls, clipboard sync, multi-monitor, or audio yet — deliberately not rushed.
+  The full honest list lives in [`docs/known-limitations.md`](docs/known-limitations.md).
+
+## 🚀 Get started
+
+### 1. The coordination API
 
 ```sh
 cargo run -p abhiverse-api
 # listening on http://127.0.0.1:8080
 curl http://127.0.0.1:8080/health
-# {"app":"ABHIVERSE","service":"abhiverse-api","status":"ok","version":"0.2.0","protocol_version":1}
 ```
 
-Override the bind address with `ABHIVERSE_BIND_ADDR`, e.g.
-`ABHIVERSE_BIND_ADDR=127.0.0.1:9000 cargo run -p abhiverse-api`.
-**Do not expose this unauthenticated Task 001 API to the internet.**
+For anywhere-access, deploy it (see [`docs/remote-access.md`](docs/remote-access.md)):
+**VPS path** — Caddy auto-HTTPS → API + coturn (the only path with a TURN fallback), or
+**Tunnel path** — free, no VPS, `cloudflared tunnel --url http://localhost:8080`
+(STUN-only media; the URL changes per restart, so re-point both sides).
 
-### 2. Device agent
+### 2. The laptop agent
 
 ```sh
-cargo run -p abhiverse-agent-windows -- --version   # abhiverse-agent 0.2.0
-cargo run -p abhiverse-agent-windows -- --identity  # device ID + public identity
-cargo run -p abhiverse-agent-windows -- --pair --api http://127.0.0.1:8080
-cargo run -p abhiverse-agent-windows                # runs until Ctrl+C (heartbeats if paired)
-cargo run -p abhiverse-agent-windows -- --revoke    # unpair/revoke this device
-cargo run -p abhiverse-agent-windows -- --send-file ~/photo.jpg   # to the paired phone
+cargo run -p abhiverse-agent-windows -- --pair --api <your-api-url>
+# scan the QR (or enter the 6-digit code) in the app, approve with y on the laptop
+cargo run -p abhiverse-agent-windows                # presence heartbeat, until Ctrl+C
+cargo run -p abhiverse-agent-windows -- --remote    # answer remote sessions (asks first)
+cargo run -p abhiverse-agent-windows -- --remote --trust-paired
+#   unattended mode: sessions from your paired phone auto-accept.
+#   Anyone else is rejected. Never implies --allow-input.
 cargo run -p abhiverse-agent-windows -- --receive   # download files sent to this computer
-cargo run -p abhiverse-agent-windows -- --remote    # answer remote-desktop sessions (asks first)
+cargo run -p abhiverse-agent-windows -- --revoke    # unpair this device, instantly
 ```
 
-On first run the agent creates an Ed25519 key pair in its data
-directory (`ABHIVERSE_DATA_DIR`, default `~/.abhiverse/agent`). The
-device ID is the fingerprint of the public key. **Back up / protect
-`keypair.json` like a password — it *is* the device's identity.**
+On first run the agent creates an Ed25519 key pair (`ABHIVERSE_DATA_DIR`, default
+`~/.abhiverse/agent`). The device ID is the fingerprint of the public key.
+**Guard `keypair.json` like a password — it *is* the device's identity.**
 
-To pair: start the API, run the agent with `--pair`, then enter the
-6-digit code in the controller app and approve the prompt on the
-computer. The code expires in 5 minutes, is single-use, and the
-approval is a signature from the agent's private key.
+**Laptop on = agent on.** No more "did I open the app?" before leaving the house:
 
-The agent builds and runs on Windows, Linux and macOS today;
-Windows-specific capabilities arrive in later phases behind
-platform adapters.
+```powershell
+.\scripts\install-autostart.ps1                    # presence at every logon
+.\scripts\install-autostart.ps1 -Remote -TrustPaired  # unattended remote, your phone only
+.\scripts\uninstall-autostart.ps1                  # remove it again, completely
+```
 
-### 3. Controller (Flutter)
+Autostart is a visible Startup-folder shortcut for the current user — no admin, no service
+(a service cannot touch the interactive desktop), no registry tricks, and the agent binary
+never installs persistence by itself. Full rationale + loophole audit:
+[`docs/autostart.md`](docs/autostart.md).
+
+### 3. The phone app
 
 ```sh
 cd apps/controller
@@ -110,66 +122,71 @@ flutter pub get
 flutter run
 ```
 
-The app defaults to `http://10.0.2.2:8080` (Android emulator →
-host localhost). Point it elsewhere with:
+Point it at your API from **Settings → Server** inside the app (no rebuild needed).
+Public HTTP is refused, LAN HTTP warns — HTTPS anywhere is the happy path.
+Or grab the latest CI APK from
+[Actions → `abhiverse-controller-apk`](https://github.com/MSAbhishek22/AbhiVerse/actions)
+(debug-signed: your phone will warn about an unknown developer. That warning is correct.)
+
+## 🔐 Security in 60 seconds
+
+- **Keys, not passwords.** Every device and every controller has its own Ed25519 identity.
+  Requests are signed; the server verifies. A stolen session id alone buys nothing.
+- **Approval lives on the target.** Pairing needs a `y` on the laptop. Remote sessions need
+  a `y` on the laptop — unless you deliberately chose `--trust-paired`, which trusts only
+  the already-paired controller and nobody else.
+- **Revoke is instant and total.** From either side, including live remote sessions.
+- **No trackers. No account. No subscription.** Keys never leave devices. The app asks for
+  exactly two permissions: camera (QR scan) and internet.
+- **The blunt part (also in the app's Terms):** approving the wrong device, exposing a
+  server without HTTPS, or ignoring the cleartext warning is *your* fault. Bugs in
+  Abhiverse's own code are *ours*. Read the full model in [`SECURITY.md`](SECURITY.md)
+  and [`docs/threat-model.md`](docs/threat-model.md).
+
+## 🧪 Tests & checks
 
 ```sh
-# Physical device on the same LAN as your computer:
-flutter run --dart-define=ABHIVERSE_API_BASE_URL=http://192.168.1.20:8080
-
-# Desktop / web / iOS simulator against a local server:
-flutter run --dart-define=ABHIVERSE_API_BASE_URL=http://127.0.0.1:8080
-```
-
-## Tests & checks
-
-```sh
-# Rust
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-
-# Flutter
-cd apps/controller
-flutter analyze
-flutter test
+cd apps/controller && flutter analyze && flutter test
 ```
 
-Verified for v0.4 (Linux dev host, Rust 1.99, Flutter 3.47):
-Rust — 22 tests passing, clippy + rustfmt clean. Flutter —
-`flutter analyze` clean, 11 tests passing. Live: the complete
-remote-desktop signalling exchange (probe peer → session →
-on-device approval → signed answer → ICE exchange) plus all v0.3
-file-transfer end-to-end runs. One honest exception: the WebRTC
-data-channel connection itself could not complete inside the dev
-sandbox, which blocks all UDP sends (verified independently,
-even to localhost) — it needs a first real run on actual devices.
-Android APK builds require the Android SDK (`flutter doctor`).
+Current: Rust 51/51, Flutter 42 + 1 skipped, clippy/fmt/analyze clean, CI green.
+The dev sandbox blocks all UDP, so WebRTC media can only be verified on real hardware —
+that is the release blocker, not a footnote.
 
-## Repository layout
+## 🗂️ Repository layout
 
 ```
 abhiverse/
 ├── apps/controller/     # Flutter controller (Android first)
 ├── agents/windows/      # Rust device agent
-├── crates/protocol/     # Shared Rust protocol types
+├── crates/protocol/     # Shared protocol types (protocol v2)
+├── crates/identity/     # Ed25519 device identity
+├── crates/file-transfer/# Chunked, SHA-256-verified transfer
+├── crates/win-input/    # DXGI capture + SendInput injection
 ├── server/api/          # Rust coordination API (Axum)
-├── docs/                # Architecture, protocol, threat model
-└── .github/workflows/   # CI: Rust checks + Flutter analysis/tests
+├── scripts/             # Real-device runner, autostart installer
+├── docs/                # Architecture, protocol, threat model, guides
+└── .github/workflows/   # CI: Rust + Windows target + Flutter + Android
 ```
 
-## Roadmap
+## 🗺️ Roadmap
 
-- **Task 001 — Foundation** ✅ local health check + builds
-- **Task 002** — Device identity & key generation ✅
-- **Task 003** — Pairing challenges & target-device approval ✅ (QR payload is the same code; in-app QR scanning is a later UX add)
-- **Task 004** — Authenticated presence & revocation ✅
-- **Task 005** — Secure file transfer (integrity + resume)
-- **Task 006** — Remote desktop engine & input
+- **Now:** real-device run (the release blocker) → hosted staging → installable beta
+- **Later:** power controls, clipboard sync, multi-monitor, audio, LAN auto-discovery,
+  multi-device dashboard — in that order, only when each is done properly
 
-See `docs/architecture.md` and `docs/threat-model.md` before
-contributing anything security-sensitive.
+## 🤝 Contributing & support
 
-## License
+Read [`docs/architecture.md`](docs/architecture.md) and
+[`docs/threat-model.md`](docs/threat-model.md) before touching anything security-sensitive.
+Issues and PRs are welcome — this is MIT-licensed open source, built by
+**M S Abhishek**, with love. The app itself stays free forever; if it helps you and you
+want to support it, the Support section (in the app and on the
+[website](https://msabhishek22.github.io/AbhiVerse/)) has the details.
 
-MIT — see `LICENSE`.
+## 📄 License
+
+MIT — see [`LICENSE`](LICENSE).
