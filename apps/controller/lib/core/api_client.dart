@@ -65,6 +65,20 @@ class ClaimResult {
   final String status;
 }
 
+/// The API's error shape is `{"error": "message"}`. Prefer the
+/// server's own explanation (it carries actionable hints, e.g.
+/// the clock-sync note) over a bare HTTP status.
+String? _serverError(http.Response response) {
+  try {
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map<String, dynamic>) {
+      final err = decoded['error'];
+      if (err is String && err.isNotEmpty) return err;
+    }
+  } catch (_) {}
+  return null;
+}
+
 /// Client for the devices + pairing endpoints of the API.
 class ApiClient {
   ApiClient({
@@ -72,11 +86,12 @@ class ApiClient {
     http.Client? client,
     String? controllerId,
     ControllerIdentity? identity,
-  })  : _client = client ?? http.Client(),
-        _identity = identity,
-        controllerId = identity?.deviceId ??
-            controllerId ??
-            'controller-${Random.secure().nextInt(1 << 32)}';
+  }) : _client = client ?? http.Client(),
+       _identity = identity,
+       controllerId =
+           identity?.deviceId ??
+           controllerId ??
+           'controller-${Random.secure().nextInt(1 << 32)}';
 
   final ControllerIdentity? _identity;
 
@@ -106,14 +121,19 @@ class ApiClient {
   Future<List<DeviceView>> fetchDevices() async {
     final http.Response response;
     try {
-      response =
-          await _client.get(_uri('/devices')).timeout(const Duration(seconds: 5));
+      response = await _client
+          .get(_uri('/devices'))
+          .timeout(const Duration(seconds: 5));
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for devices.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for devices.',
+      );
     }
     try {
       final decoded = jsonDecode(response.body) as Map<String, dynamic>;
@@ -133,7 +153,8 @@ class ApiClient {
     final identity = _identity;
     if (identity == null) {
       throw const AbhiverseApiException(
-          'This phone has no identity yet — restart the app to create one.');
+        'This phone has no identity yet — restart the app to create one.',
+      );
     }
     final http.Response response;
     try {
@@ -143,23 +164,30 @@ class ApiClient {
             headers: {'content-type': 'application/json'},
             body: jsonEncode({
               'code': code,
-              'controller': identity.deviceInfoJson(nameOverride: controllerName),
+              'controller': identity.deviceInfoJson(
+                nameOverride: controllerName,
+              ),
             }),
           )
           .timeout(const Duration(seconds: 5));
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode == 404) {
       throw const AbhiverseApiException(
-          'That code was not found — check it, or ask the computer for a new one.');
+        'That code was not found — check it, or ask the computer for a new one.',
+      );
     }
     if (response.statusCode == 409) {
       throw const AbhiverseApiException('That code has already been used.');
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for pairing.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for pairing.',
+      );
     }
     try {
       final decoded = jsonDecode(response.body) as Map<String, dynamic>;
@@ -173,7 +201,6 @@ class ApiClient {
     }
   }
 
-
   /// Create a transfer of [bytes] to device [toId], upload every
   /// chunk, and ask the server to verify the assembled hash.
   /// [onProgress] reports (chunksSent, totalChunks) after each chunk.
@@ -184,8 +211,9 @@ class ApiClient {
     void Function(int sent, int total)? onProgress,
   }) async {
     final digest = sha256.convert(bytes).toString();
-    final totalChunks =
-        bytes.isEmpty ? 0 : (bytes.length + transferChunkSize - 1) ~/ transferChunkSize;
+    final totalChunks = bytes.isEmpty
+        ? 0
+        : (bytes.length + transferChunkSize - 1) ~/ transferChunkSize;
     final requestId = newRequestId();
     final created = await _postJson(
       '/transfers',
@@ -231,12 +259,17 @@ class ApiClient {
         ),
       );
       final response = await _client
-          .put(_uri('/transfers/${view.transferId}/chunks/$i'),
-              headers: chunkHeaders, body: chunk)
+          .put(
+            _uri('/transfers/${view.transferId}/chunks/$i'),
+            headers: chunkHeaders,
+            body: chunk,
+          )
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) {
         throw AbhiverseApiException(
-            'Chunk ${i + 1} upload failed (HTTP ${response.statusCode}).');
+          _serverError(response) ??
+              'Chunk ${i + 1} upload failed (HTTP ${response.statusCode}).',
+        );
       }
       onProgress?.call(i + 1, totalChunks);
     }
@@ -248,10 +281,7 @@ class ApiClient {
         final ts = nowUnix();
         return _signatureHeaders(
           ts,
-          transferCompleteMessage(
-            transferId: view.transferId,
-            timestamp: ts,
-          ),
+          transferCompleteMessage(transferId: view.transferId, timestamp: ts),
         );
       },
     );
@@ -262,14 +292,19 @@ class ApiClient {
   Future<List<TransferView>> fetchIncoming() async {
     final http.Response response;
     try {
-      response =
-          await _signedGet('/transfers?for=$controllerId&as=$controllerId');
+      response = await _signedGet(
+        '/transfers?for=$controllerId&as=$controllerId',
+      );
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for transfers.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for transfers.',
+      );
     }
     try {
       final decoded = jsonDecode(response.body) as Map<String, dynamic>;
@@ -298,19 +333,24 @@ class ApiClient {
         ),
       );
       final response = await _client
-          .get(_uri('/transfers/${view.transferId}/chunks/$i'),
-              headers: chunkHeaders)
+          .get(
+            _uri('/transfers/${view.transferId}/chunks/$i'),
+            headers: chunkHeaders,
+          )
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) {
         throw AbhiverseApiException(
-            'Chunk ${i + 1} download failed (HTTP ${response.statusCode}).');
+          _serverError(response) ??
+              'Chunk ${i + 1} download failed (HTTP ${response.statusCode}).',
+        );
       }
       out.addAll(response.bodyBytes);
     }
     final digest = sha256.convert(out).toString();
     if (digest != view.sha256) {
       throw const AbhiverseApiException(
-          'Downloaded file failed its SHA-256 check — not saving it.');
+        'Downloaded file failed its SHA-256 check — not saving it.',
+      );
     }
     return out;
   }
@@ -344,7 +384,8 @@ class ApiClient {
       } catch (_) {
         if (attempt == 1) {
           throw const AbhiverseApiException(
-              'Could not reach the Abhiverse server.');
+            'Could not reach the Abhiverse server.',
+          );
         }
         _client.close();
         _client = http.Client();
@@ -353,7 +394,9 @@ class ApiClient {
       }
       if (response.statusCode != expected) {
         throw AbhiverseApiException(
-            'Server returned HTTP ${response.statusCode} for $path.');
+          _serverError(response) ??
+              'Server returned HTTP ${response.statusCode} for $path.',
+        );
       }
       return jsonDecode(response.body) as Map<String, dynamic>;
     }
@@ -379,7 +422,6 @@ class ApiClient {
         .timeout(const Duration(seconds: 5));
   }
 
-
   /// Revoke a paired device using this controller's signature
   /// (the API also accepts the device's own signature).
   Future<void> revokeDevice(String deviceId) async {
@@ -388,8 +430,9 @@ class ApiClient {
       throw const AbhiverseApiException('This phone has no identity yet.');
     }
     final ts = nowUnix();
-    final signature = await identity
-        .sign(revokeMessage(deviceId: deviceId, timestamp: ts));
+    final signature = await identity.sign(
+      revokeMessage(deviceId: deviceId, timestamp: ts),
+    );
     final http.Response response;
     try {
       response = await _client
@@ -400,11 +443,15 @@ class ApiClient {
           )
           .timeout(const Duration(seconds: 5));
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for revoke.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for revoke.',
+      );
     }
   }
 
@@ -414,11 +461,15 @@ class ApiClient {
     try {
       response = await _signedGet('/config/rtc?as=$controllerId');
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for RTC config.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for RTC config.',
+      );
     }
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
     return (decoded['ice_servers'] as List<dynamic>)
@@ -463,17 +514,21 @@ class ApiClient {
   Future<SessionView> fetchSession(String sessionId) async {
     final http.Response response;
     try {
-      response =
-          await _signedGet('/sessions/$sessionId?as=$controllerId');
+      response = await _signedGet('/sessions/$sessionId?as=$controllerId');
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for session.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for session.',
+      );
     }
     return SessionView.fromJson(
-        jsonDecode(response.body) as Map<String, dynamic>);
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   /// Trickle one local ICE candidate to the session.
@@ -499,8 +554,9 @@ class ApiClient {
           iceCandidateMessage(
             sessionId: sessionId,
             fromId: controllerId,
-            candidateSha256Hex:
-                sha256.convert(utf8.encode(candidate)).toString(),
+            candidateSha256Hex: sha256
+                .convert(utf8.encode(candidate))
+                .toString(),
             timestamp: ts,
           ),
         );
@@ -516,13 +572,18 @@ class ApiClient {
     final http.Response response;
     try {
       response = await _signedGet(
-          '/sessions/$sessionId/ice?as=$controllerId&after=$after');
+        '/sessions/$sessionId/ice?as=$controllerId&after=$after',
+      );
     } catch (_) {
-      throw const AbhiverseApiException('Could not reach the Abhiverse server.');
+      throw const AbhiverseApiException(
+        'Could not reach the Abhiverse server.',
+      );
     }
     if (response.statusCode != 200) {
       throw AbhiverseApiException(
-          'Server returned HTTP ${response.statusCode} for ICE candidates.');
+        _serverError(response) ??
+            'Server returned HTTP ${response.statusCode} for ICE candidates.',
+      );
     }
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
     return (decoded['candidates'] as List<dynamic>)
@@ -532,18 +593,13 @@ class ApiClient {
   Future<SessionView> endSession(String sessionId) async {
     final ended = await _postJson(
       '/sessions/$sessionId/end',
-      {
-        'from_id': controllerId,
-      },
+      {'from_id': controllerId},
       expected: 200,
       signedHeaders: () async {
         final ts = nowUnix();
         return _signatureHeaders(
           ts,
-          sessionEndMessage(
-            sessionId: sessionId,
-            timestamp: ts,
-          ),
+          sessionEndMessage(sessionId: sessionId, timestamp: ts),
         );
       },
     );
@@ -552,6 +608,7 @@ class ApiClient {
 
   void close() => _client.close();
 }
+
 /// A file transfer as reported by the API (mirrors Rust TransferView).
 class TransferView {
   const TransferView({
@@ -593,6 +650,7 @@ class TransferView {
 
 /// Chunk size shared with the Rust transfer engine.
 const int transferChunkSize = 256 * 1024;
+
 /// A remote-desktop session as reported by the API (mirrors Rust
 /// `SessionView`). The SDP/ICE plumbing is used by the WebRTC
 /// viewer when it lands (slice 006b).
