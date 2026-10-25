@@ -1,8 +1,8 @@
 use abhiverse_file_transfer::sha256_hex;
 use abhiverse_identity::{ensure_identity, DeviceIdentity};
 use abhiverse_protocol::{
-    now_unix, pairing_approve_message, session_answer_message, session_end_message,
-    session_reject_message, DeviceKind,
+    ice_candidate_message, now_unix, pairing_approve_message, session_answer_message,
+    session_end_message, session_reject_message, signed_get_message, DeviceKind,
 };
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -43,6 +43,25 @@ fn signed_at(id: &DeviceIdentity, message: &str, ts: i64) -> Vec<(String, String
         ("x-abhiverse-timestamp".into(), ts.to_string()),
         ("x-abhiverse-signature".into(), id.sign(message)),
     ]
+}
+
+fn signed_get(id: &DeviceIdentity, path: &str) -> Vec<(String, String)> {
+    let ts = now_unix();
+    signed_at(id, &signed_get_message(path, &id.info.device_id, ts), ts)
+}
+
+fn ice_headers(id: &DeviceIdentity, sid: &str, candidate: &str) -> Vec<(String, String)> {
+    let ts = now_unix();
+    signed_at(
+        id,
+        &ice_candidate_message(
+            sid,
+            &id.info.device_id,
+            &sha256_hex(candidate.as_bytes()),
+            ts,
+        ),
+        ts,
+    )
 }
 
 fn make_controller(tag: &str) -> DeviceIdentity {
@@ -121,8 +140,16 @@ async fn full_signalling_flow() {
     let (app, agent, controller) = paired_app("flow").await;
     let dev = agent.info.device_id.clone();
 
-    // RTC config defaults to STUN.
-    let (s, cfg) = call(app.clone(), Method::GET, "/config/rtc", None, vec![]).await;
+    // RTC config defaults to STUN (signed: TURN credentials are sensitive).
+    let rtc_path = format!("/config/rtc?as={}", controller.info.device_id);
+    let (s, cfg) = call(
+        app.clone(),
+        Method::GET,
+        &rtc_path,
+        None,
+        signed_get(&controller, &rtc_path),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert!(cfg["ice_servers"][0]["urls"][0]
         .as_str()
@@ -158,7 +185,7 @@ async fn full_signalling_flow() {
     assert_eq!(view["status"], "offered");
     let sid = view["session_id"].as_str().unwrap().to_string();
 
-    // Non-participants cannot read the session.
+    // Unknown callers cannot read the session (no registered key).
     let (s, _) = call(
         app.clone(),
         Method::GET,
@@ -167,15 +194,16 @@ async fn full_signalling_flow() {
         vec![],
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
-    // The agent discovers it via the for-list.
+    // The agent discovers it via the for-list (signed).
+    let list_path = format!("/sessions?for={dev}&as={dev}");
     let (_, list) = call(
         app.clone(),
         Method::GET,
-        &format!("/sessions?for={dev}"),
+        &list_path,
         None,
-        vec![],
+        signed_get(&agent, &list_path),
     )
     .await;
     assert_eq!(list["sessions"].as_array().unwrap().len(), 1);
@@ -211,7 +239,7 @@ async fn full_signalling_flow() {
     // ICE flows both ways; each side sees only the other's candidates.
     let (s, r) = call(app.clone(), Method::POST, &format!("/sessions/{sid}/ice"), Some(json!({
         "from_id": controller.info.device_id, "candidate": "candidate:ctrl", "sdp_mid": "0", "sdp_mline_index": 0,
-    })), vec![]).await;
+    })), ice_headers(&controller, &sid, "candidate:ctrl")).await;
     assert_eq!(s, StatusCode::OK);
     let seq_ctrl = r["seq"].as_u64().unwrap();
     let (s, _) = call(
@@ -221,52 +249,56 @@ async fn full_signalling_flow() {
         Some(json!({
             "from_id": dev, "candidate": "candidate:agent", "sdp_mid": "0", "sdp_mline_index": 0,
         })),
-        vec![],
+        ice_headers(&agent, &sid, "candidate:agent"),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
 
+    let ice_path = format!("/sessions/{sid}/ice?as={dev}");
     let (_, ice) = call(
         app.clone(),
         Method::GET,
-        &format!("/sessions/{sid}/ice?as={dev}"),
+        &ice_path,
         None,
-        vec![],
+        signed_get(&agent, &ice_path),
     )
     .await;
     let cands = ice["candidates"].as_array().unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0]["candidate"], "candidate:ctrl");
 
+    let ice_path = format!(
+        "/sessions/{sid}/ice?as={}&after={seq_ctrl}",
+        controller.info.device_id
+    );
     let (_, ice) = call(
         app.clone(),
         Method::GET,
-        &format!(
-            "/sessions/{sid}/ice?as={}&after={seq_ctrl}",
-            controller.info.device_id
-        ),
+        &ice_path,
         None,
-        vec![],
+        signed_get(&controller, &ice_path),
     )
     .await;
     let cands = ice["candidates"].as_array().unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0]["candidate"], "candidate:agent");
 
-    // Controller ends the session; further ICE is a conflict.
+    // Controller ends the session (signed); further ICE is a conflict.
+    let ts = now_unix();
+    let end_headers = signed_at(&controller, &session_end_message(&sid, ts), ts);
     let (s, view) = call(
         app.clone(),
         Method::POST,
         &format!("/sessions/{sid}/end"),
         Some(json!({ "from_id": controller.info.device_id })),
-        vec![],
+        end_headers,
     )
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(view["status"], "ended");
     let (s, _) = call(app.clone(), Method::POST, &format!("/sessions/{sid}/ice"), Some(json!({
         "from_id": controller.info.device_id, "candidate": "candidate:late", "sdp_mid": null, "sdp_mline_index": null,
-    })), vec![]).await;
+    })), ice_headers(&controller, &sid, "candidate:late")).await;
     assert_eq!(s, StatusCode::CONFLICT);
 }
 
