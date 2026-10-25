@@ -20,6 +20,12 @@ investor, competitor):
   Android API 31, which CI run #80 proved cannot consume the
   exifinterface 1.4.1 the graph now resolves; 1.6 targets API 36
   and ships a much newer WebRTC — a security win too),
+- Settings hub (gear icon): server controls moved out of a dialog
+  into a real screen, plus Terms & Conditions, Privacy & Security,
+  FAQ, open-source licences, Support (UPI, copyable), and About with
+  the app version. The Terms state liability bluntly: approving the
+  wrong device, exposing a server without HTTPS, or ignoring the
+  cleartext warning is the user's fault, not the app's.
   with a 1 GB client-side guard matching the
   server cap and chunk progress as before.
 - **In-app server settings.** The API URL is no longer
