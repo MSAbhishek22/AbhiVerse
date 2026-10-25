@@ -16,7 +16,11 @@ abhiverse-file-transfer = { path = "../../crates/file-transfer" }
 abhiverse-win-input = { path = "../../crates/win-input" }
 openh264 = "0.6"
 bytes = "1"
-ureq = { version = "2", features = ["json"] }
+# "tls" is not optional: a hosted API is https-only (the controller
+# refuses public http), so pairing, heartbeats and transfers must
+# all speak TLS. Without it the agent could only ever talk to a
+# LAN/localhost API — i.e. no anywhere-over-the-internet mode.
+ureq = { version = "2", features = ["json", "tls"] }
 qrcode = { version = "0.14", default-features = false }
 webrtc = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
