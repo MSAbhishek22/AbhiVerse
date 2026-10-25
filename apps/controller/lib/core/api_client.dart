@@ -220,8 +220,19 @@ class ApiClient {
           ? bytes.length
           : start + transferChunkSize;
       final chunk = bytes.sublist(start, end);
+      final chunkTs = nowUnix();
+      final chunkHeaders = await _signatureHeaders(
+        chunkTs,
+        chunkUploadMessage(
+          transferId: view.transferId,
+          index: i,
+          chunkSha256Hex: sha256.convert(chunk).toString(),
+          timestamp: chunkTs,
+        ),
+      );
       final response = await _client
-          .put(_uri('/transfers/${view.transferId}/chunks/$i'), body: chunk)
+          .put(_uri('/transfers/${view.transferId}/chunks/$i'),
+              headers: chunkHeaders, body: chunk)
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) {
         throw AbhiverseApiException(
@@ -230,8 +241,20 @@ class ApiClient {
       onProgress?.call(i + 1, totalChunks);
     }
     final done = await _postJson(
-        '/transfers/${view.transferId}/complete', const {},
-        expected: 200);
+      '/transfers/${view.transferId}/complete',
+      const {},
+      expected: 200,
+      signedHeaders: () async {
+        final ts = nowUnix();
+        return _signatureHeaders(
+          ts,
+          transferCompleteMessage(
+            transferId: view.transferId,
+            timestamp: ts,
+          ),
+        );
+      },
+    );
     return TransferView.fromJson(done);
   }
 
@@ -239,9 +262,8 @@ class ApiClient {
   Future<List<TransferView>> fetchIncoming() async {
     final http.Response response;
     try {
-      response = await _client
-          .get(_uri('/transfers?for=$controllerId'))
-          .timeout(const Duration(seconds: 5));
+      response =
+          await _signedGet('/transfers?for=$controllerId&as=$controllerId');
     } catch (_) {
       throw const AbhiverseApiException('Could not reach the Abhiverse server.');
     }
@@ -266,8 +288,18 @@ class ApiClient {
   Future<List<int>> downloadBytes(TransferView view) async {
     final out = <int>[];
     for (var i = 0; i < view.totalChunks; i++) {
+      final chunkTs = nowUnix();
+      final chunkHeaders = await _signatureHeaders(
+        chunkTs,
+        chunkDownloadMessage(
+          transferId: view.transferId,
+          index: i,
+          timestamp: chunkTs,
+        ),
+      );
       final response = await _client
-          .get(_uri('/transfers/${view.transferId}/chunks/$i'))
+          .get(_uri('/transfers/${view.transferId}/chunks/$i'),
+              headers: chunkHeaders)
           .timeout(const Duration(seconds: 15));
       if (response.statusCode != 200) {
         throw AbhiverseApiException(
@@ -328,6 +360,25 @@ class ApiClient {
     throw StateError('unreachable');
   }
 
+  /// Signed GET: the signature covers the exact path + query sent,
+  /// so a signed read cannot be transplanted onto another resource.
+  /// (Reads are idempotent, so the server verifies but does not
+  /// replay-record them: polling loops hit the same second twice.)
+  Future<http.Response> _signedGet(String path) async {
+    final ts = nowUnix();
+    final headers = await _signatureHeaders(
+      ts,
+      signedGetMessage(
+        pathAndQuery: path,
+        callerId: controllerId,
+        timestamp: ts,
+      ),
+    );
+    return _client
+        .get(_uri(path), headers: headers)
+        .timeout(const Duration(seconds: 5));
+  }
+
 
   /// Revoke a paired device using this controller's signature
   /// (the API also accepts the device's own signature).
@@ -361,9 +412,7 @@ class ApiClient {
   Future<List<IceServerConfig>> fetchRtcConfig() async {
     final http.Response response;
     try {
-      response = await _client
-          .get(_uri('/config/rtc'))
-          .timeout(const Duration(seconds: 5));
+      response = await _signedGet('/config/rtc?as=$controllerId');
     } catch (_) {
       throw const AbhiverseApiException('Could not reach the Abhiverse server.');
     }
@@ -414,9 +463,8 @@ class ApiClient {
   Future<SessionView> fetchSession(String sessionId) async {
     final http.Response response;
     try {
-      response = await _client
-          .get(_uri('/sessions/$sessionId?as=$controllerId'))
-          .timeout(const Duration(seconds: 5));
+      response =
+          await _signedGet('/sessions/$sessionId?as=$controllerId');
     } catch (_) {
       throw const AbhiverseApiException('Could not reach the Abhiverse server.');
     }
@@ -435,12 +483,29 @@ class ApiClient {
     String? sdpMid,
     int? sdpMlineIndex,
   }) async {
-    await _postJson('/sessions/$sessionId/ice', {
-      'from_id': controllerId,
-      'candidate': candidate,
-      'sdp_mid': sdpMid,
-      'sdp_mline_index': sdpMlineIndex,
-    }, expected: 200);
+    await _postJson(
+      '/sessions/$sessionId/ice',
+      {
+        'from_id': controllerId,
+        'candidate': candidate,
+        'sdp_mid': sdpMid,
+        'sdp_mline_index': sdpMlineIndex,
+      },
+      expected: 200,
+      signedHeaders: () async {
+        final ts = nowUnix();
+        return _signatureHeaders(
+          ts,
+          iceCandidateMessage(
+            sessionId: sessionId,
+            fromId: controllerId,
+            candidateSha256Hex:
+                sha256.convert(utf8.encode(candidate)).toString(),
+            timestamp: ts,
+          ),
+        );
+      },
+    );
   }
 
   /// The other side's ICE candidates with seq > [after].
@@ -450,9 +515,8 @@ class ApiClient {
   }) async {
     final http.Response response;
     try {
-      response = await _client
-          .get(_uri('/sessions/$sessionId/ice?as=$controllerId&after=$after'))
-          .timeout(const Duration(seconds: 5));
+      response = await _signedGet(
+          '/sessions/$sessionId/ice?as=$controllerId&after=$after');
     } catch (_) {
       throw const AbhiverseApiException('Could not reach the Abhiverse server.');
     }
@@ -466,9 +530,23 @@ class ApiClient {
   }
 
   Future<SessionView> endSession(String sessionId) async {
-    final ended = await _postJson('/sessions/$sessionId/end', {
-      'from_id': controllerId,
-    }, expected: 200);
+    final ended = await _postJson(
+      '/sessions/$sessionId/end',
+      {
+        'from_id': controllerId,
+      },
+      expected: 200,
+      signedHeaders: () async {
+        final ts = nowUnix();
+        return _signatureHeaders(
+          ts,
+          sessionEndMessage(
+            sessionId: sessionId,
+            timestamp: ts,
+          ),
+        );
+      },
+    );
     return SessionView.fromJson(ended);
   }
 
