@@ -193,19 +193,15 @@ async fn run_async(
                     );
                     true
                 }
-                OfferDecision::Prompt => {
-                    tokio::task::spawn_blocking(move || {
-                        print!(
-                            "Remote desktop request from '{who}' (session {sid}). Accept? [y/N] "
-                        );
-                        let _ = std::io::stdout().flush();
-                        let mut line = String::new();
-                        let _ = std::io::stdin().read_line(&mut line);
-                        line.trim().eq_ignore_ascii_case("y")
-                    })
-                    .await
-                    .unwrap_or(false)
-                }
+                OfferDecision::Prompt => tokio::task::spawn_blocking(move || {
+                    print!("Remote desktop request from '{who}' (session {sid}). Accept? [y/N] ");
+                    let _ = std::io::stdout().flush();
+                    let mut line = String::new();
+                    let _ = std::io::stdin().read_line(&mut line);
+                    line.trim().eq_ignore_ascii_case("y")
+                })
+                .await
+                .unwrap_or(false),
                 OfferDecision::Reject => {
                     eprintln!(
                         "Rejecting remote desktop session {sid} from '{}': not the paired controller.",
