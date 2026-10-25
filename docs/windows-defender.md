@@ -23,16 +23,24 @@ but scanners cannot read intent, only behaviour.
 
 ## What Abhiverse already does to reduce flags
 
-- **No persistence, no autostart, no hidden process.** The agent
-  is a visible console window. It does not install a service,
-  does not add itself to startup, and does not hide.
+- **No self-installed persistence, no hidden process.** The agent
+  is a visible console window. It never installs a service, never
+  adds itself to startup, and does not hide. Autostart exists
+  only as an explicit user-run installer
+  (`scripts/install-autostart.ps1`, Startup-folder shortcut,
+  current user, minimized console) and is fully removable with
+  `scripts/uninstall-autostart.ps1` — see `docs/autostart.md`.
 - **No silent input.** Input injection requires the agent's
   explicit `--allow-input` flag AND an approved session. Without
   both, the viewer is view-only.
-- **No silent sessions.** Every remote session needs the person
-  at the computer to approve it at the agent prompt, and the
-  console title switches to a persistent ACTIVE warning while a
-  session runs.
+- **No silent sessions — by default.** Every remote session needs
+  the person at the computer to approve it at the agent prompt,
+  and the console title switches to a persistent ACTIVE warning
+  while a session runs. The one exception is the explicit
+  `--trust-paired` opt-in (autostart's unattended mode), which
+  auto-accepts sessions ONLY from the already-paired controller,
+  prints an UNATTENDED MODE banner at startup, and is revoked
+  instantly like any pairing. See `docs/autostart.md`.
 - **No packing or obfuscation.** Release binaries are plain,
   unpacked Rust builds. Packers are one of the strongest
   heuristic triggers; Abhiverse does not use them.
