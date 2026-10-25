@@ -23,8 +23,11 @@ dev sandbox allows, but still await the real-device run in
   dashboard is future work).
 - Stream quality tops out at 640×360 / 10 fps (adaptive tiers go
   down from there); no audio, no multi-monitor selection.
-- Controller→agent chunk uploads are unsigned; integrity rests on
-  the whole-file SHA-256 (verified at completion and on receipt).
+- Every transfer chunk upload/download, session read, ICE trickle
+  and RTC-config fetch is signed by the sending device/controller
+  (closed 2026-10-25: previously controller uploads/downloads and
+  all session reads were unsigned). Whole-file SHA-256 is still
+  verified at completion and on receipt as the integrity backstop.
 - Pairing and remote sessions are intentionally not persisted;
   pairings and transfers are (with `ABHIVERSE_STATE_FILE`).
 - The Android launcher artwork is the stock Flutter icon;
