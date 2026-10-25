@@ -16,6 +16,10 @@ investor, competitor):
   (file_selector, the Flutter team's own picker — file_picker was
   dropped after CI run #75 proved its Android module pins Kotlin 1.8,
   which cannot build under the app's AGP 9 / Gradle 9 toolchain),
+  and flutter_webrtc 0.12 → 1.6 (the old module compiled against
+  Android API 31, which CI run #80 proved cannot consume the
+  exifinterface 1.4.1 the graph now resolves; 1.6 targets API 36
+  and ships a much newer WebRTC — a security win too),
   with a 1 GB client-side guard matching the
   server cap and chunk progress as before.
 - **In-app server settings.** The API URL is no longer
