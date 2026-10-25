@@ -7,7 +7,10 @@ managing your own devices from anywhere — a personal control centre
 for your phone, laptop and tablet, across operating systems and
 across networks.
 
-> **Status: v0.5.3 — public beta preparation.**
+> **Status: v0.5.4 — production hardening (pre-release).**
+> All API reads and mutations are signed by the calling device or
+> controller (see `SECURITY.md`); the release blocker remains the
+> real-device run on physical hardware.
 > Device identity (Ed25519) for agents *and* controllers, pairing
 > with signed approval (code or QR), presence, revocation signed by
 > either side, chunked file transfer with SHA-256 integrity and
