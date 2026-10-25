@@ -11,6 +11,7 @@ import '../../core/file_names.dart';
 import '../../core/health_client.dart';
 import 'scan_page.dart';
 import '../remote/remote_viewer.dart';
+import '../settings/settings_screen.dart';
 
 enum AbhiverseConnectionState { loading, connected, unreachable }
 
@@ -213,79 +214,25 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _showEndpointDialog() async {
+  /// Open the Settings hub (server, docs, support, about). The hub
+  /// reports back whether the server changed; on return the home
+  /// screen re-checks against whatever server is now configured.
+  Future<void> _openSettings() async {
     final onChanged = widget.onEndpointChanged;
     if (onChanged == null) return;
-    final urlController = TextEditingController(
-      text: widget.healthClient.config.apiBaseUrl,
-    );
-    var error = '';
-    final result = await showDialog<String?>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Server settings'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'The computer running the Abhiverse server. On your '
-                  'home Wi-Fi this is its LAN address, e.g. '
-                  'http://192.168.1.20:8080. A hosted server must use '
-                  'https.',
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: urlController,
-                  keyboardType: TextInputType.url,
-                  decoration: const InputDecoration(
-                    labelText: 'Server URL',
-                    hintText: 'http://192.168.1.20:8080',
-                  ),
-                ),
-                if (error.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(error, style: const TextStyle(color: Colors.red)),
-                ],
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, ''),
-              child: const Text('Reset to default'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final check = checkApiBaseUrl(urlController.text.trim());
-                if (check.blocked) {
-                  setDialogState(() => error = check.message ?? 'Bad URL.');
-                  return;
-                }
-                Navigator.pop(dialogContext, urlController.text.trim());
-              },
-              child: const Text('Save'),
-            ),
-          ],
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          currentServerUrl: widget.healthClient.config.apiBaseUrl,
+          onServerChanged: onChanged,
         ),
       ),
     );
-    // Cancel/backdrop pops null (do nothing); Reset pops '' and
-    // Save pops the URL string.
-    if (result == null || !mounted) return;
-    if (result.isEmpty) {
-      await onChanged(null);
-    } else {
-      await onChanged(result);
-    }
     if (!mounted) return;
-    setState(() => _notice = 'Server changed — reconnecting…');
+    if (changed == true) {
+      setState(() => _notice = 'Server changed — reconnecting…');
+    }
     await _check();
   }
 
@@ -298,8 +245,8 @@ class _HomeScreenState extends State<HomeScreen> {
           if (widget.onEndpointChanged != null)
             IconButton(
               icon: const Icon(Icons.settings),
-              tooltip: 'Server settings',
-              onPressed: _showEndpointDialog,
+              tooltip: 'Settings',
+              onPressed: _openSettings,
             ),
         ],
       ),
