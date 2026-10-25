@@ -34,12 +34,48 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
+/// What to do with an incoming session offer.
+///
+/// The default is Prompt: a human at this keyboard approves every
+/// session. That is the safe default — but it makes unattended use
+/// (laptop at home, owner in the market) impossible, because nobody
+/// is here to press `y`. `trust_paired` is the explicit opt-in for
+/// that case, and it is deliberately narrow: it auto-accepts ONLY
+/// offers from the controller this device is already paired with.
+/// An offer from anyone else is rejected outright, never prompted
+/// (a prompt nobody reads is not consent, it is a hang).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfferDecision {
+    AutoAccept,
+    Prompt,
+    Reject,
+}
+
+fn decide_offer(
+    session_controller_id: &str,
+    paired_controller_id: &str,
+    trust_paired: bool,
+) -> OfferDecision {
+    if session_controller_id == paired_controller_id {
+        if trust_paired {
+            OfferDecision::AutoAccept
+        } else {
+            OfferDecision::Prompt
+        }
+    } else {
+        // Session creation is pairing-gated server-side, so this
+        // should not happen; if it does, fail closed and loud.
+        OfferDecision::Reject
+    }
+}
+
 pub fn run(
     identity: DeviceIdentity,
     allow_input: bool,
+    trust_paired: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(run_async(identity, allow_input))
+    runtime.block_on(run_async(identity, allow_input, trust_paired))
 }
 
 struct Signalling {
@@ -79,6 +115,7 @@ impl Signalling {
 async fn run_async(
     identity: DeviceIdentity,
     allow_input: bool,
+    trust_paired: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = abhiverse_identity::default_data_dir();
     let Some(record) = abhiverse_agent_windows::load_pairing(&data_dir) else {
@@ -102,6 +139,12 @@ async fn run_async(
         println!("Input injection is ENABLED (--allow-input): an approved controller can move the mouse and type on this desktop.");
     } else {
         println!("Input injection is disabled: incoming input events will be logged only. Restart with --remote --allow-input to enable control.");
+    }
+    if trust_paired {
+        println!("UNATTENDED MODE (--trust-paired): sessions from your paired controller are auto-accepted WITHOUT a prompt here. Anyone else is rejected. Revoke the pairing to stop this instantly.");
+        if allow_input {
+            println!("UNATTENDED MODE + INPUT: your paired phone can move the mouse and type on this desktop while you are away. Lock this computer (Win+L) when you leave it, and revoke on loss.");
+        }
     }
 
     let rtc: RtcConfig = sig.get_json("/config/rtc").await?;
@@ -139,15 +182,38 @@ async fn run_async(
                 session.controller_id.clone()
             };
             let sid = session.session_id.clone();
-            let accept = tokio::task::spawn_blocking(move || {
-                print!("Remote desktop request from '{who}' (session {sid}). Accept? [y/N] ");
-                let _ = std::io::stdout().flush();
-                let mut line = String::new();
-                let _ = std::io::stdin().read_line(&mut line);
-                line.trim().eq_ignore_ascii_case("y")
-            })
-            .await
-            .unwrap_or(false);
+            let accept = match decide_offer(
+                &session.controller_id,
+                &record.controller_id,
+                trust_paired,
+            ) {
+                OfferDecision::AutoAccept => {
+                    println!(
+                        "Auto-accepting remote desktop session {sid} from paired controller '{who}' (--trust-paired)."
+                    );
+                    true
+                }
+                OfferDecision::Prompt => {
+                    tokio::task::spawn_blocking(move || {
+                        print!(
+                            "Remote desktop request from '{who}' (session {sid}). Accept? [y/N] "
+                        );
+                        let _ = std::io::stdout().flush();
+                        let mut line = String::new();
+                        let _ = std::io::stdin().read_line(&mut line);
+                        line.trim().eq_ignore_ascii_case("y")
+                    })
+                    .await
+                    .unwrap_or(false)
+                }
+                OfferDecision::Reject => {
+                    eprintln!(
+                        "Rejecting remote desktop session {sid} from '{}': not the paired controller.",
+                        session.controller_id
+                    );
+                    false
+                }
+            };
 
             if accept {
                 let sig_client = Signalling {
@@ -719,6 +785,22 @@ mod tests {
         assert_eq!(pick_tier(Medium, 0.0, 1_500_000.0), Medium);
         assert_eq!(pick_tier(Medium, 0.05, 2_500_000.0), Medium);
         let _ = QualityTier::High; // keep imports obviously used
+    }
+
+    use super::decide_offer;
+    use super::OfferDecision::{AutoAccept, Prompt, Reject};
+
+    #[test]
+    fn offer_decision_trusts_only_the_paired_controller() {
+        // Paired + trusted: unattended auto-accept (the market case).
+        assert_eq!(decide_offer("ctrl-1", "ctrl-1", true), AutoAccept);
+        // Paired + not trusted: the safe default, prompt every time.
+        assert_eq!(decide_offer("ctrl-1", "ctrl-1", false), Prompt);
+        // Anyone else: rejected in both modes — trust is
+        // per-controller, never blanket, and never a prompt that
+        // nobody is here to answer.
+        assert_eq!(decide_offer("ctrl-2", "ctrl-1", true), Reject);
+        assert_eq!(decide_offer("ctrl-2", "ctrl-1", false), Reject);
     }
 
     use super::split_annexb;
