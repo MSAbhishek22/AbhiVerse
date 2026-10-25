@@ -3,177 +3,188 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Abhiverse — The only bridge between your phone and your laptop</title>
+<title>Abhiverse — Your laptop, from your pocket</title>
 <meta name="description" content="Abhiverse is the only free, open-source bridge that turns your Android phone into a full Windows remote: screen, keyboard, files and power. No account. No subscription.">
-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;800&family=Pixelify+Sans:wght@500;700&family=VT323&family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
   :root{
     --xp:#245edb; --xp2:#3a6ce8; --sky:#8ec9ee; --grass:#5da244;
     --paper:#fdf6e3; --cream:#fffdf4; --ink:#1c2230; --muted:#4c5260;
-    --green:#2b8a3e; --gold:#e8a33d; --red:#d23c2e; --holo1:#22d3ee; --holo2:#e879f9; --holo3:#facc15;
+    --green:#2b8a3e; --pink:#ff2e88; --lime:#d8ff3d;
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
   body{
-    margin:0; font-family:"Inter",Tahoma,Verdana,sans-serif; color:var(--ink); font-size:16px; line-height:1.6;
+    margin:0; font-family:"Inter",Tahoma,Verdana,sans-serif; color:var(--ink); font-size:17px; line-height:1.6;
     background:linear-gradient(180deg,#8ec9ee 0%,#5aa9e6 42%,#7ec850 43%,#4e8f3a 100%);
-    background-attachment:scroll; overflow-x:hidden;
+    overflow-x:hidden;
   }
-  body.crt{--xp:#0f9d58; --xp2:#00c853; --sky:#0b3d24}
-  /* ---- texture overlays: scanlines + grain, never blocking clicks ---- */
-  .scanlines{position:fixed; inset:0; z-index:60; pointer-events:none; background:repeating-linear-gradient(0deg, rgba(0,0,0,.10) 0 1px, transparent 1px 3px); opacity:.5}
-  .grain{position:fixed; inset:0; z-index:61; pointer-events:none; opacity:.10; mix-blend-mode:overlay;
+  body.crt{--xp:#0f9d58; --xp2:#00c853}
+  /* grain: faint, page-wide, never over text legibility */
+  .grain{position:fixed; inset:0; z-index:61; pointer-events:none; opacity:.07; mix-blend-mode:overlay;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");}
-  .dots-bg{background-image:radial-gradient(circle, rgba(0,0,0,.18) 1px, transparent 1px); background-size:22px 22px}
-  /* ---- top bar ---- */
+  /* one blurred blob behind hero only */
+  .blob{position:absolute; width:420px; height:420px; border-radius:50%; filter:blur(70px); opacity:.55; pointer-events:none;
+    background:radial-gradient(circle, #22d3ee, #e879f9 55%, transparent 75%); top:-60px; right:-80px; z-index:0}
+  /* ---- top bar: the ONE sticky element ---- */
   .topbar{position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:12px; padding:10px 16px; color:#fff;
     background:linear-gradient(180deg,#3b81f2,#245edb 55%,#1a4fc4); box-shadow:0 3px 0 rgba(0,0,0,.28)}
-  .topbar .logo{font-family:"VT323",monospace; font-size:32px; letter-spacing:1px; line-height:1}
+  .topbar .logo{font-family:"Baloo 2",cursive; font-size:30px; line-height:1; letter-spacing:.5px}
   .topbar .tag{font-size:12px; opacity:.92}
   .topbar .spacer{flex:1}
-  .xpbtn{font-family:Tahoma,sans-serif; font-size:14px; font-weight:700; color:#1c2230; cursor:pointer; text-decoration:none; display:inline-block;
-    background:linear-gradient(180deg,#fff,#e8e4d8 50%,#cfc9b8); border:2px solid #7a7568; border-radius:8px; padding:8px 16px;
+  .xpbtn{font-family:Tahoma,sans-serif; font-size:15px; font-weight:700; color:#1c2230; cursor:pointer; text-decoration:none; display:inline-block;
+    min-height:48px; line-height:1.2; padding:13px 18px;
+    background:linear-gradient(180deg,#fff,#e8e4d8 50%,#cfc9b8); border:2px solid #7a7568; border-radius:10px;
     box-shadow:inset -1px -1px #8a8578, inset 1px 1px #fff, 0 3px 0 rgba(0,0,0,.3)}
-  .xpbtn:active{transform:translateY(2px); box-shadow:inset 1px 1px #8a8578, inset -1px -1px #fff}
+  .xpbtn:active{transform:scale(.97)}
   .xpbtn.primary{background:linear-gradient(180deg,#9ed67e,#3a9e4b 50%,#2b7a38); color:#fff; border-color:#1d5c27}
-  .xpbtn.glow:hover{box-shadow:0 0 18px #facc15, 0 0 32px rgba(250,204,21,.7), inset -1px -1px #8a8578, inset 1px 1px #fff}
+  .xpbtn.primary:hover{box-shadow:0 0 0 3px var(--lime), 0 0 24px rgba(216,255,61,.8), inset -1px -1px #8a8578, inset 1px 1px #fff}
   /* ---- hero ---- */
-  .hero{text-align:center; padding:30px 16px 6px; color:#fff; text-shadow:0 2px 8px rgba(0,0,0,.4)}
-  .eyebrow{font-family:"Press Start 2P",monospace; font-size:10px; letter-spacing:2px; background:rgba(0,0,0,.35); display:inline-block; padding:8px 12px; border-radius:999px}
-  .hero h1{margin:14px 0 0; font-size:clamp(44px,9vw,96px); line-height:.95; letter-spacing:1px}
-  .foil{background:linear-gradient(100deg,#fff 10%,var(--holo1) 30%,var(--holo2) 50%,var(--holo3) 70%,#fff 90%);
+  .hero{position:relative; text-align:center; padding:34px 16px 6px; color:#fff; text-shadow:0 2px 8px rgba(0,0,0,.4); overflow:hidden}
+  .hero .inner{position:relative; z-index:1}
+  .eyebrow{font-family:"Pixelify Sans",monospace; font-size:13px; letter-spacing:2px; background:rgba(0,0,0,.35); display:inline-block; padding:9px 14px; border-radius:999px}
+  .hero h1{margin:14px 0 0; font-family:"Baloo 2",cursive; font-size:clamp(42px,8.5vw,88px); line-height:1; letter-spacing:.5px}
+  .foil{background:linear-gradient(100deg,#fff 10%,#22d3ee 30%,#e879f9 50%,#facc15 70%,#fff 90%);
     background-size:250% 250%; -webkit-background-clip:text; background-clip:text; color:transparent;
     animation:foil 6s ease-in-out infinite; filter:drop-shadow(0 3px 0 rgba(0,0,0,.35))}
   @keyframes foil{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
-  .hero .sub{font-size:clamp(19px,3.4vw,30px); font-weight:800; margin-top:6px}
-  .hero p.proof{max-width:680px; margin:14px auto 0; font-size:16px; font-weight:600; background:rgba(0,0,0,.30); border-radius:12px; padding:12px 16px}
-  /* ---- marquee ---- */
-  .marquee{overflow:hidden; white-space:nowrap; background:#111827; color:#facc15; border-top:3px solid #facc15; border-bottom:3px solid #facc15; margin:22px 0 0; padding:8px 0}
-  .marquee .track{display:inline-block; animation:mq 22s linear infinite; font-family:"VT323",monospace; font-size:24px; letter-spacing:2px}
+  .hero .sub{font-size:clamp(18px,3vw,24px); font-weight:600; margin-top:10px; max-width:620px; margin-left:auto; margin-right:auto}
+  .hero p.proof{max-width:660px; margin:16px auto 0; font-size:16px; font-weight:600; background:rgba(0,0,0,.32); border-radius:12px; padding:12px 16px}
+  .marquee{overflow:hidden; white-space:nowrap; background:#111827; color:#facc15; border-top:3px solid #facc15; border-bottom:3px solid #facc15; margin:22px 0 0; padding:9px 0}
+  .marquee .track{display:inline-block; animation:mq 24s linear infinite; font-family:"VT323",monospace; font-size:24px; letter-spacing:2px}
   @keyframes mq{to{transform:translateX(-50%)}}
   /* ---- stage: the working machine ---- */
-  .stage-wrap{max-width:980px; margin:0 auto; padding:26px 14px 10px; perspective:1200px}
+  .stage-wrap{max-width:980px; margin:0 auto; padding:28px 14px 10px; perspective:1200px}
   .stage{position:relative; display:flex; gap:22px; align-items:flex-start; justify-content:center; flex-wrap:wrap;
-    transition:transform .35s ease-out; transform-style:preserve-3d}
+    transition:transform .3s ease-out; transform-style:preserve-3d}
   .glare{position:absolute; inset:-10px; pointer-events:none; z-index:5; border-radius:20px;
     background:radial-gradient(circle at var(--mx,50%) var(--my,50%), rgba(255,255,255,.28), transparent 55%); mix-blend-mode:screen}
-  .sticker{position:absolute; z-index:6; font-weight:800; font-size:13px; padding:7px 12px; border:2px solid #111827; border-radius:999px;
-    background:#facc15; box-shadow:0 4px 0 rgba(0,0,0,.35); transform:rotate(-8deg)}
-  .sticker.s2{right:6px; top:-14px; background:#22d3ee; transform:rotate(7deg)}
+  /* sticker sheet: white outline + shadow, slight rotations */
+  .sticker{position:absolute; z-index:6; font-family:"Pixelify Sans",monospace; font-weight:700; font-size:13px; padding:8px 13px;
+    border:3px solid #fff; outline:2px solid #111827; border-radius:999px; background:#facc15; color:#111827;
+    box-shadow:0 5px 0 rgba(0,0,0,.35); transform:rotate(-6deg)}
+  .sticker.s2{right:6px; top:-14px; background:var(--lime); transform:rotate(5deg)}
   .sticker.s3{left:42%; bottom:-14px; background:#fff; transform:rotate(-3deg)}
-  /* laptop */
-  .laptop{width:min(560px,94vw); transform:rotateX(4deg); transform-style:preserve-3d}
-  .lap-screen{border:6px solid #1c2230; border-radius:12px 12px 0 0; overflow:hidden; background:#7ec850; box-shadow:0 24px 50px rgba(0,0,0,.45), 0 4px 0 rgba(255,255,255,.5) inset}
-  .titlebar{display:flex; align-items:center; gap:8px; padding:7px 10px; color:#fff; font-weight:700; font-size:13px;
+  .sticker.s4{left:-6px; top:44%; background:var(--pink); color:#fff; transform:rotate(6deg)}
+  .laptop{width:min(560px,94vw); transform-style:preserve-3d}
+  .lap-screen{border:6px solid #1c2230; border-radius:12px 12px 0 0; overflow:hidden; background:#7ec850; box-shadow:0 24px 50px rgba(0,0,0,.45)}
+  .titlebar{display:flex; align-items:center; gap:8px; padding:9px 10px; color:#fff; font-weight:700; font-size:14px;
     background:linear-gradient(180deg,#3b81f2,#245edb 55%,#1a4fc4)}
   .titlebar .tb{margin-left:auto; display:flex; gap:4px}
-  .titlebar .tb span{width:20px; height:20px; border-radius:4px; background:linear-gradient(180deg,#fff,#d8d2c0); color:#222; font-size:12px; line-height:20px; text-align:center; border:1px solid #7a7568}
+  .titlebar .tb span{width:22px; height:22px; border-radius:4px; background:linear-gradient(180deg,#fff,#d8d2c0); color:#222; font-size:12px; line-height:22px; text-align:center; border:1px solid #7a7568}
   .desktop{position:relative; height:300px; background:linear-gradient(180deg,#7ec850 0%,#a5d6a7 55%,#5da244 100%); overflow:hidden}
   .desktop .hill{position:absolute; bottom:0; left:-10%; width:120%; height:120px; background:#4e8f3a; border-radius:50% 50% 0 0}
   .desktop .icon{position:absolute; width:64px; text-align:center; color:#fff; font-size:11px; font-weight:700; text-shadow:0 1px 3px #000}
   .desktop .icon i{display:block; width:40px; height:40px; margin:0 auto 4px; border-radius:8px; background:linear-gradient(180deg,#fff,#cfe3f5); box-shadow:0 3px 6px rgba(0,0,0,.4); font-style:normal; font-size:20px; line-height:40px}
-  .notepad{position:absolute; left:50%; top:46%; transform:translate(-50%,-50%); width:78%; background:#fffdf4; border:2px solid #7a7568; border-radius:8px; box-shadow:0 10px 24px rgba(0,0,0,.4); overflow:hidden}
-  .notepad .nb{padding:6px 10px; background:#efe9d2; font-size:12px; font-weight:700; border-bottom:1px solid #d8d2bd}
+  /* scanlines ONLY inside screens */
+  .scan{position:absolute; inset:0; pointer-events:none; z-index:2;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,.10) 0 1px, transparent 1px 3px)}
+  .notepad{position:absolute; left:50%; top:46%; transform:translate(-50%,-50%); width:78%; background:#fffdf4; border:2px solid #7a7568; border-radius:8px; box-shadow:0 10px 24px rgba(0,0,0,.4); overflow:hidden; z-index:1}
+  .notepad .nb{padding:6px 10px; background:#efe9d2; font-size:13px; font-weight:700; border-bottom:1px solid #d8d2bd}
   .notepad .nt{padding:10px 12px; min-height:74px; font-family:"VT323",monospace; font-size:22px; color:#1c2230; white-space:pre-wrap}
   .lap-state{position:absolute; inset:0; display:none; align-items:center; justify-content:center; color:#fff; font-family:"VT323",monospace; font-size:34px; text-shadow:0 2px 6px #000; background:rgba(0,0,0,.55); z-index:3}
   .lap-state.show{display:flex}
-  .taskbar{display:flex; align-items:center; gap:8px; padding:5px 8px; color:#fff; font-size:12px;
+  .taskbar{display:flex; align-items:center; gap:8px; padding:6px 8px; color:#fff; font-size:13px;
     background:linear-gradient(180deg,#3b81f2,#245edb 55%,#1a4fc4)}
-  .taskbar .start{background:linear-gradient(180deg,#8fd67e,#2b8a3e); border-radius:10px; padding:4px 12px; font-weight:800; font-style:italic}
-  .taskbar .clock{margin-left:auto; font-family:"VT323",monospace; font-size:18px}
+  .taskbar .start{background:linear-gradient(180deg,#8fd67e,#2b8a3e); border-radius:10px; padding:5px 13px; font-weight:800; font-style:italic}
+  .taskbar .clock{margin-left:auto; font-family:"VT323",monospace; font-size:19px}
   .lap-base{height:16px; margin:0 -14px; background:linear-gradient(180deg,#e8e4d8,#b8b2a0); border-radius:0 0 14px 14px; box-shadow:0 14px 24px rgba(0,0,0,.4)}
-  /* phone */
-  .phone{width:230px; transform:rotateY(-10deg) rotateX(3deg); transform-style:preserve-3d}
-  .ph-body{border:5px solid #1c2230; border-radius:28px; overflow:hidden; background:#fdf6e3; box-shadow:0 24px 50px rgba(0,0,0,.45)}
+  .phone{width:240px; transform-style:preserve-3d}
+  .ph-body{border:5px solid #1c2230; border-radius:28px; overflow:hidden; background:#fdf6e3; box-shadow:0 24px 50px rgba(0,0,0,.45); position:relative}
   .ph-head{padding:12px 10px 10px; text-align:center; color:#fff; background:linear-gradient(180deg,#5b8dd9,#2f5fb4)}
   .ph-head .word{font-family:cursive; font-size:26px; font-weight:700}
-  .ph-head .stat{font-family:"VT323",monospace; font-size:18px; opacity:.95}
+  .ph-head .stat{font-family:"VT323",monospace; font-size:19px; opacity:.95}
   .ph-screen{padding:12px}
-  .ph-screen .row{display:flex; gap:8px; flex-wrap:wrap; justify-content:center}
-  .phbtn{flex:1 1 44%; font-family:Tahoma,sans-serif; font-weight:700; font-size:13px; cursor:pointer; padding:9px 4px; border-radius:10px;
+  .ph-screen .row{display:flex; gap:10px; flex-wrap:wrap; justify-content:center}
+  .phbtn{flex:1 1 44%; font-family:Tahoma,sans-serif; font-weight:700; font-size:14px; cursor:pointer; min-height:48px; padding:12px 4px; border-radius:12px;
     border:2px solid #7a7568; background:linear-gradient(180deg,#fff,#e8e4d8 50%,#cfc9b8); box-shadow:0 3px 0 rgba(0,0,0,.3)}
-  .phbtn:active{transform:translateY(2px); box-shadow:none}
-  .ph-log{margin-top:10px; background:#111827; color:#7CFC98; font-family:"VT323",monospace; font-size:17px; padding:8px 10px; border-radius:8px; min-height:52px}
-  .bridge{position:relative; height:34px; margin:6px 0 0; overflow:visible}
+  .phbtn:active{transform:scale(.97)}
+  .ph-log{margin-top:10px; background:#111827; color:#7CFC98; font-family:"VT323",monospace; font-size:18px; padding:9px 10px; border-radius:8px; min-height:54px}
+  .ph-demo-note{font-size:12px; color:#4c5260; text-align:center; margin-top:8px}
+  .bridge{position:relative; height:34px; margin:6px 0 0}
   .bridge .line{position:absolute; left:0; right:0; top:16px; height:4px; border-radius:4px; background:linear-gradient(90deg,#22d3ee,#e879f9,#facc15); background-size:200% 100%; animation:foil 4s linear infinite}
   .bridge .dot{position:absolute; top:10px; width:16px; height:16px; border-radius:50%; background:#fff; border:3px solid #e879f9; box-shadow:0 0 14px #e879f9; animation:travel 3s linear infinite}
   @keyframes travel{0%{left:2%}100%{left:96%}}
-  .stage-note{text-align:center; color:#fff; font-size:13px; font-weight:600; text-shadow:0 1px 3px rgba(0,0,0,.5); margin-top:8px}
-  /* ---- windows / sections ---- */
+  .stage-note{text-align:center; color:#fff; font-size:14px; font-weight:600; text-shadow:0 1px 3px rgba(0,0,0,.5); margin-top:10px}
+  /* ---- windows / sections: solid opaque cards, short copy ---- */
   .wrap{max-width:980px; margin:0 auto; padding:8px 14px 44px}
-  .win{background:var(--cream); border:2px solid #7a7568; border-radius:10px; overflow:hidden; margin-top:22px;
+  .win{background:var(--cream); border:2px solid #7a7568; border-radius:12px; overflow:hidden; margin-top:24px;
     box-shadow:0 2px 0 #fff inset, 0 18px 40px rgba(0,0,0,.35)}
-  .win .body{padding:20px 22px 24px}
-  .win h2{font-family:"VT323",monospace; font-size:36px; margin:0 0 6px; letter-spacing:.5px}
-  .win p, .win li{font-size:16px; line-height:1.7; color:#2b2f3a}
+  .win .body{padding:22px 24px 26px}
+  .win h2{font-family:"Baloo 2",cursive; font-size:32px; margin:0 0 6px; line-height:1.15}
+  .win p, .win li{font-size:17px; line-height:1.65; color:#2b2f3a; max-width:68ch}
   .win ul{padding-left:20px}
   .steps{display:grid; gap:12px; margin-top:14px}
   @media(min-width:640px){.steps{grid-template-columns:1fr 1fr 1fr}}
-  .step{background:#fff; border:2px solid #d8d2bd; border-radius:10px; padding:14px; transition:transform .2s}
-  .step:hover{transform:rotate(-1deg) scale(1.02)}
+  .step{background:#fff; border:2px solid #d8d2bd; border-radius:12px; padding:16px; transition:transform .2s, box-shadow .2s}
+  .step:hover{transform:translateY(-4px); box-shadow:0 12px 24px rgba(0,0,0,.18)}
   .step b.num{display:inline-block; width:32px; height:32px; border-radius:50%; background:var(--xp); color:#fff; text-align:center; line-height:32px; margin-bottom:6px}
   .feat{display:grid; gap:12px; margin-top:14px}
   @media(min-width:640px){.feat{grid-template-columns:1fr 1fr}}
-  .feat div{background:#fff; border:2px solid #d8d2bd; border-radius:10px; padding:14px; transition:transform .15s}
-  .feat div:hover{animation:jiggle .4s ease}
-  @keyframes jiggle{0%,100%{transform:rotate(0)}25%{transform:rotate(-2deg) scale(1.02)}75%{transform:rotate(2deg) scale(1.02)}}
-  .feat div b{font-size:17px}
-  .feat .glow:hover{box-shadow:0 0 0 3px #22d3ee, 0 0 24px rgba(34,211,238,.8)}
-  table{width:100%; border-collapse:collapse; font-size:14px; margin-top:12px}
-  th,td{border:1px solid #ddd3b8; padding:9px; text-align:left}
+  .feat div{background:#fff; border:2px solid #d8d2bd; border-radius:12px; padding:16px; transition:transform .2s, box-shadow .2s}
+  .feat div:hover{transform:translateY(-4px); box-shadow:0 0 0 3px #22d3ee, 0 14px 26px rgba(0,0,0,.18)}
+  .feat div b{font-size:18px}
+  table{width:100%; border-collapse:collapse; font-size:15px; margin-top:12px}
+  th,td{border:1px solid #ddd3b8; padding:10px; text-align:left}
   th{background:#efe9d2}
   td.yes{color:#2b7a38; font-weight:800}
   .qrbox{text-align:center}
   .qrbox img{width:min(280px,80vw); border:10px solid #fff; border-radius:14px; box-shadow:0 8px 22px rgba(0,0,0,.3)}
   .qrbox .upi{font-family:"VT323",monospace; font-size:24px; margin-top:8px}
   .social{display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:12px}
-  code{background:#efe9d2; padding:1px 6px; border-radius:4px; font-size:13px}
-  .note{font-size:13px; color:var(--muted); border-top:1px dashed #d8d2bd; margin-top:14px; padding-top:10px}
-  /* animated gradient-border CTA */
+  code{background:#efe9d2; padding:1px 6px; border-radius:4px; font-size:14px}
+  .note{font-size:14px; color:var(--muted); border-top:1px dashed #d8d2bd; margin-top:14px; padding-top:10px}
+  /* holo foil on exactly ONE card: the download card */
   @property --angle{syntax:"<angle>"; inherits:false; initial-value:0deg}
-  .cta-grad{display:inline-block; padding:3px; border-radius:12px;
+  .cta-grad{display:inline-block; padding:3px; border-radius:14px;
     background:linear-gradient(#fff,#fff) padding-box, conic-gradient(from var(--angle), #22d3ee, #e879f9, #facc15, #22d3ee) border-box;
     border:3px solid transparent; animation:spin 4s linear infinite}
   @keyframes spin{to{--angle:360deg}}
-  .footer{text-align:center; color:#fff; font-size:13px; padding:0 14px 34px; text-shadow:0 1px 3px rgba(0,0,0,.5)}
+  .footer{text-align:center; color:#fff; font-size:14px; padding:0 14px 34px; text-shadow:0 1px 3px rgba(0,0,0,.5)}
   .footer a{color:#fff}
+  .rise{opacity:0; transform:translateY(16px); transition:opacity .4s ease, transform .4s ease}
+  .rise.in{opacity:1; transform:none}
   @media (prefers-reduced-motion: reduce){
     *,*::before,*::after{animation:none !important; transition:none !important; transform:none !important}
+    .rise{opacity:1}
   }
 </style>
 </head>
 <body>
-<div class="scanlines" aria-hidden="true"></div>
 <div class="grain" aria-hidden="true"></div>
 
 <div class="topbar">
-  <div class="logo">ABHIVERSE</div>
+  <div class="logo">✦ ABHIVERSE</div>
   <div class="tag">your phone · your laptop · one bridge</div>
   <div class="spacer"></div>
   <button class="xpbtn" id="crtBtn" title="Switch the page skin">🖥 CRT MODE</button>
-  <a class="xpbtn primary glow" href="https://github.com/MSAbhishek22/AbhiVerse/releases/tag/v0.5.3">⬇ Get the app</a>
+  <a class="xpbtn primary" href="https://github.com/MSAbhishek22/AbhiVerse/releases/tag/v0.5.3">⬇ Get Abhiverse free</a>
 </div>
 
 <div class="hero">
-  <span class="eyebrow">FOR ANDROID OWNERS WITH A WINDOWS LAPTOP</span>
-  <h1><span class="foil">THE ONLY BRIDGE</span></h1>
-  <div class="sub">between your phone and your laptop.</div>
-  <p class="proof">The only <b>free, open-source</b> bridge that turns your Android phone into a full Windows remote — <b>screen, keyboard, files and power</b>. No account. No subscription. Built in the open, so you can check every line of code that touches your data.</p>
+  <div class="blob" aria-hidden="true"></div>
+  <div class="inner">
+    <span class="eyebrow">FOR ANDROID OWNERS WITH A WINDOWS LAPTOP</span>
+    <h1>Your laptop,<br><span class="foil">from your pocket.</span></h1>
+    <p class="sub">Your Android phone becomes your laptop's screen, keyboard and power button — free, open source, no account.</p>
+    <p class="proof">The only free, open-source bridge that turns your phone into a full Windows remote — <b>screen, keyboard, files and power</b>. No subscription. Built in the open, so you can check every line of code that touches your data.</p>
+  </div>
 </div>
 
-<div class="marquee" aria-hidden="true"><div class="track">SCREEN ✦ KEYBOARD ✦ FILES ✦ POWER ✦ NO ACCOUNT ✦ OPEN SOURCE ✦ NO SUBSCRIPTION ✦ ACROSS NETWORKS ✦&nbsp;SCREEN ✦ KEYBOARD ✦ FILES ✦ POWER ✦ NO ACCOUNT ✦ OPEN SOURCE ✦ NO SUBSCRIPTION ✦ ACROSS NETWORKS ✦&nbsp;</div></div>
+<div class="marquee" aria-hidden="true"><div class="track">✦ SCREEN ✦ KEYBOARD ✦ FILES ✦ POWER ✦ NO ACCOUNT ✦ OPEN SOURCE ✦ NO SUBSCRIPTION ✦ ACROSS NETWORKS ✦&nbsp;✦ SCREEN ✦ KEYBOARD ✦ FILES ✦ POWER ✦ NO ACCOUNT ✦ OPEN SOURCE ✦ NO SUBSCRIPTION ✦ ACROSS NETWORKS ✦&nbsp;</div></div>
 
 <div class="stage-wrap">
   <div class="stage" id="stage">
     <div class="glare" id="glare"></div>
     <div class="sticker">100% FREE!</div>
     <div class="sticker s2">OPEN SOURCE</div>
-    <div class="sticker s3">NO ACCOUNT NEEDED</div>
-    <!-- LAPTOP -->
+    <div class="sticker s3">NO ACCOUNT</div>
+    <div class="sticker s4">SO SMOOTH ✦</div>
     <div class="laptop" id="laptop">
       <div class="lap-screen">
         <div class="titlebar">💻 Abhishek's Laptop — Windows <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
         <div class="desktop">
+          <div class="scan" aria-hidden="true"></div>
           <div class="hill"></div>
           <div class="icon" style="left:12px;top:14px"><i>📁</i>Files</div>
           <div class="icon" style="left:12px;top:96px"><i>🌐</i>Browser</div>
@@ -188,56 +199,56 @@
       </div>
       <div class="lap-base"></div>
     </div>
-    <!-- PHONE -->
     <div class="phone">
       <div class="ph-body">
         <div class="ph-head"><div class="word">Abhiverse</div><div class="stat" id="phStat">● CONNECTED · LAPTOP ONLINE</div></div>
         <div class="ph-screen">
           <div class="row">
-            <button class="phbtn" onclick="doPower('wake')">☀️ Wake</button>
-            <button class="phbtn" onclick="doPower('sleep')">🌙 Sleep</button>
-            <button class="phbtn" onclick="doPower('lock')">🔒 Lock</button>
             <button class="phbtn" onclick="doType()">⌨️ Type</button>
+            <button class="phbtn" onclick="doMouse()">🖱️ Move mouse</button>
             <button class="phbtn" onclick="doFile()">📤 Send file</button>
-            <button class="phbtn" onclick="doPower('wake')">🔄 Wake again</button>
+            <button class="phbtn" onclick="doPower('sleep')">🌙 Sleep</button>
+            <button class="phbtn" onclick="doPower('wake')">☀️ Wake</button>
+            <button class="phbtn" onclick="doVolume()">🔊 Volume</button>
           </div>
-          <div class="ph-log" id="phLog">› phone ready. press a button ↑</div>
+          <div class="ph-log" id="phLog" aria-live="polite">› Connected. Your laptop says hi.</div>
+          <div class="ph-demo-note">Pretend demo — the real app does this for real. <button onclick="doReset()" style="border:none;background:none;color:#245edb;font-weight:700;cursor:pointer;padding:0">Reset ↺</button></div>
         </div>
       </div>
       <div class="bridge" aria-hidden="true"><div class="line"></div><div class="dot"></div></div>
     </div>
   </div>
-  <div class="stage-note">👆 This is a live toy, not a picture — press the phone's buttons and watch the laptop answer. That's the whole product, in miniature.</div>
+  <div class="stage-note">👆 A live toy, not a picture — press the phone's buttons and watch the laptop answer. That's the whole product, in miniature.</div>
 </div>
 
 <div class="wrap">
 
-  <section class="win"><div class="titlebar">💬 In plain words <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">💬 In plain words <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body">
-      <h2>Your phone is the remote for your laptop.</h2>
-      <p>That's it. That's the whole idea. Left your laptop upstairs? Your phone already has it. No more running back to your desk, no cable, no second app for every little job.</p>
+      <h2>Laptop upstairs, phone in hand?</h2>
+      <p>You're covered. No more running back to your desk, no cable, no second app for every little job.</p>
       <div class="steps">
         <div class="step"><b class="num">1</b><br><b>Install on both.</b><br>One app on your phone, one small program on your laptop. Both free.</div>
-        <div class="step"><b class="num">2</b><br><b>Scan &amp; approve.</b><br>Your laptop shows a code. Scan it, approve on the laptop. Done — no account, no password.</div>
+        <div class="step"><b class="num">2</b><br><b>Scan &amp; approve.</b><br>Your laptop shows a code. Scan it, approve on the laptop. No account, no password.</div>
         <div class="step"><b class="num">3</b><br><b>Control everything.</b><br>Screen, keyboard, files, power — from the phone in your pocket, at home or away.</div>
       </div>
       <p class="note"><b>Why was it needed?</b> Apple only talks to Apple. Samsung only talks to Samsung. Remote tools charge rent and route your screen through their servers. Abhiverse is the bridge nobody else would build: one open system for the devices you actually own.</p>
     </div>
   </section>
 
-  <section class="win"><div class="titlebar">✨ What you can do <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">✨ What you can do <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body">
       <h2>One bridge. Four superpowers.</h2>
       <div class="feat">
-        <div class="glow"><b>👀 See your screen</b><br>Your laptop's desktop, live on your phone. Check a download, read a document, see who's calling — from the sofa.</div>
-        <div class="glow"><b>⌨️ Type &amp; click</b><br>Your phone becomes the keyboard and mouse. Reply to a message, pause a video, fix a typo — without getting up.</div>
-        <div class="glow"><b>📤 Send files, both ways</b><br>Photos, notes, assignments — chunked, hash-checked transfers, so a file that arrives is exactly the file that left.</div>
-        <div class="glow"><b>🔌 Power, from anywhere</b><br>Wake it, sleep it, lock it, shut it down. Your laptop listens to your phone like a TV listens to its remote.</div>
+        <div><b>👀 See your screen</b><br>Your laptop's desktop, live on your phone. Check a download from the sofa.</div>
+        <div><b>⌨️ Type &amp; click</b><br>Your phone becomes the keyboard and mouse. Reply without getting up.</div>
+        <div><b>📤 Send files, both ways</b><br>Photos, notes, assignments — hash-checked, so what arrives is exactly what left.</div>
+        <div><b>🔌 Power, from anywhere</b><br>Wake it, sleep it, lock it, shut it down. Like a TV remote, for your laptop.</div>
       </div>
     </div>
   </section>
 
-  <section class="win"><div class="titlebar">⚖ Why this bridge, not the others <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">⚖ Why this bridge, not the others <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body">
       <h2>Better where it counts</h2>
       <table>
@@ -253,22 +264,22 @@
     </div>
   </section>
 
-  <section class="win"><div class="titlebar">🛡 Secure, and audited — not just claimed <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">🛡 Secure, and audited — not just claimed <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body">
       <h2>Nobody gets in unless you say so.</h2>
       <p>On 25 Oct 2026 the codebase passed a full source audit (<a href="https://github.com/MSAbhishek22/AbhiVerse/blob/main/docs/security-audit-2026-10-25.md">read the report</a>). The short version:</p>
       <ul>
-        <li><b>Keys never leave your devices.</b> Your private key lives in secure storage on the phone and a locked file on Windows. Never uploaded, never logged.</li>
+        <li><b>Keys never leave your devices.</b> Secure storage on the phone, a locked file on Windows. Never uploaded, never logged.</li>
         <li><b>Every request is signed.</b> Fakes and replays are refused automatically.</li>
-        <li><b>Nothing is automatic.</b> Pairing, sessions and remote input need your explicit approval on the laptop. Anything unsigned or unpaired is <b>blocked and logged</b> — only you can approve or revoke it. Nothing overrides you.</li>
-        <li><b>Zero telemetry.</b> No analytics, ads or tracking. The app talks only to the address you configure. No background data, no third-party installs, no silent uploads.</li>
+        <li><b>Nothing is automatic.</b> Pairing, sessions and remote input need your explicit approval on the laptop. Anything unsigned or unpaired is <b>blocked and logged</b> — only you can approve or revoke it.</li>
+        <li><b>Zero telemetry.</b> No analytics, ads or tracking. The app talks only to the address you configure.</li>
         <li><b>Instant kill switch.</b> Revoke a device and its live sessions end immediately.</li>
       </ul>
       <p class="note">One advisory from the audit: plain HTTP is allowed for trusted local-network testing — always use the HTTPS address for a hosted setup.</p>
     </div>
   </section>
 
-  <section class="win"><div class="titlebar">📲 Install in minutes <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">📲 Install in minutes <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body">
       <h2>From zero to remote in three steps</h2>
       <div class="steps">
@@ -277,13 +288,13 @@
         <div class="step"><b class="num">3</b><br><b>Approve on the laptop</b><br>when prompted. Your laptop appears in the app — ready to control.</div>
       </div>
       <p>Fastest path: <code>scripts\run-real-device-test.ps1</code> builds everything and opens pairing in one command. Full guide: <a href="https://github.com/MSAbhishek22/AbhiVerse/blob/main/docs/real-device-setup.md">docs/real-device-setup.md</a>.</p>
-      <p><span class="cta-grad"><a class="xpbtn primary glow" href="https://github.com/MSAbhishek22/AbhiVerse/releases/tag/v0.5.3">⬇ Download v0.5.3 (pre-release)</a></span>
+      <p><span class="cta-grad"><a class="xpbtn primary" href="https://github.com/MSAbhishek22/AbhiVerse/releases/tag/v0.5.3">⬇ Get Abhiverse free</a></span>
       <a class="xpbtn" href="https://github.com/MSAbhishek22/AbhiVerse">⌨ Source on GitHub</a></p>
       <p class="note">Status: public beta. Core features are built and tested; live video/input on real hardware is being validated — the README carries the honest list.</p>
     </div>
   </section>
 
-  <section class="win"><div class="titlebar">♥ Support the maker <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">♥ Support the maker <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body qrbox">
       <h2>Abhiverse is free. Support is optional.</h2>
       <p>If this project helped you — or you just want to keep it alive — support the maker directly. Scan with any UPI app:</p>
@@ -293,7 +304,7 @@
     </div>
   </section>
 
-  <section class="win"><div class="titlebar">👤 About &amp; connect <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
+  <section class="win rise"><div class="titlebar">👤 About &amp; connect <span class="tb"><span>–</span><span>▢</span><span>✕</span></span></div>
     <div class="body">
       <h2>Who built this bridge?</h2>
       <p><b>M S Abhishek</b> — an AI/ML enthusiast and engineering student who builds in the open. Abhiverse started as a personal itch: his phone and laptop refused to behave like one system, so he built the system himself — Rust, Flutter, WebRTC and all — and published it for everyone instead of keeping it private.</p>
@@ -316,29 +327,41 @@
 </div>
 
 <script>
-  // clock
   function tick(){ var d=new Date(); document.getElementById('clock').textContent = String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
   tick(); setInterval(tick, 15000);
-  // toy demo: phone buttons drive the laptop
   var log = document.getElementById('phLog'), note = document.getElementById('notepadText'),
       state = document.getElementById('lapState'), stat = document.getElementById('phStat');
   function say(t){ log.textContent = '› ' + t; }
   function doPower(mode){
-    if(mode==='sleep'){ state.textContent='💤 Sleeping…'; state.classList.add('show'); stat.textContent='● LAPTOP ASLEEP'; say('sleep sent · laptop is dozing'); }
-    if(mode==='lock'){ state.textContent='🔒 Locked — approve to unlock'; state.classList.add('show'); stat.textContent='● LAPTOP LOCKED'; say('lock sent · laptop locked'); }
-    if(mode==='wake'){ state.classList.remove('show'); stat.textContent='● CONNECTED · LAPTOP ONLINE'; say('wake sent · laptop is awake ✓'); }
+    if(mode==='sleep'){ state.textContent='💤 Sleeping…'; state.classList.add('show'); stat.textContent='● LAPTOP ASLEEP'; say('Put it to sleep without standing up.'); }
+    if(mode==='wake'){ state.classList.remove('show'); stat.textContent='● CONNECTED · LAPTOP ONLINE'; say('Connected. Your laptop says hi.'); }
   }
   function doType(){
     state.classList.remove('show');
     note.textContent = 'Hello from my phone! 👋\nThis is Abhiverse — I typed this\nwithout touching the laptop.';
-    say('typed into Notepad from the phone ✓');
+    say('Typed from your pocket. Nice.');
+  }
+  function doMouse(){
+    state.classList.remove('show');
+    note.textContent = '🖱️ Cursor moved from the phone.\nClick, scroll, drag — all from\nyour hand. No desk needed.';
+    say('Mouse moved. Couch approved.');
   }
   function doFile(){
     state.classList.remove('show');
     note.textContent = 'Receiving photo-vacation.zip…\n████████████ 100%\n✓ SHA-256 verified — file is exact.';
-    say('file sent · hash verified ✓');
+    say('File sent. Check Downloads on your laptop.');
   }
-  // tilt + glare on the stage
+  function doVolume(){
+    state.classList.remove('show');
+    note.textContent = '🔊 Volume: 60% → 80%\nMovie night, fixed from the sofa.';
+    say('Volume up. No remote hunt.');
+  }
+  function doReset(){
+    state.classList.remove('show');
+    note.textContent = 'Try me — press TYPE on the phone →';
+    stat.textContent = '● CONNECTED · LAPTOP ONLINE';
+    say('Connected. Your laptop says hi.');
+  }
   var stage = document.getElementById('stage'), glare = document.getElementById('glare');
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if(!reduce){
@@ -352,12 +375,17 @@
     document.querySelector('.stage-wrap').addEventListener('mouseleave', function(){
       stage.style.transform = 'perspective(1200px)';
     });
+    var io = new IntersectionObserver(function(es){
+      es.forEach(function(en){ if(en.isIntersecting){ en.target.classList.add('in'); io.unobserve(en.target); } });
+    }, {threshold: 0.12});
+    document.querySelectorAll('.rise').forEach(function(el){ io.observe(el); });
+  } else {
+    document.querySelectorAll('.rise').forEach(function(el){ el.classList.add('in'); });
   }
-  // CRT / XP mode toggle — the playful surprise
   document.getElementById('crtBtn').addEventListener('click', function(){
     var on = document.body.classList.toggle('crt');
     this.textContent = on ? '💻 XP MODE' : '🖥 CRT MODE';
-    say(on ? 'crt mode on · green terminal vibes' : 'xp mode on · classic blue bliss');
+    say(on ? 'CRT mode on. Green terminal vibes.' : 'XP mode on. Classic blue bliss.');
   });
 </script>
 </body>
