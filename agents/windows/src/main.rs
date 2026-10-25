@@ -13,6 +13,23 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
+/// HTTP client for control-plane calls: a 10 s timeout, so a hung
+/// connection can never stall the heartbeat/pairing loops forever
+/// (previously bare `ureq` calls had no timeout at all).
+fn http_client() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(10))
+        .build()
+}
+
+/// HTTP client for chunk transfers: a 256 KiB chunk may legitimately
+/// take a while on a slow link, but must still be bounded.
+fn http_transfer_client() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(120))
+        .build()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -84,13 +101,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let api_url = record.api_url.clone();
         let shared = std::sync::Arc::new(identity);
         let thread_identity = shared.clone();
+        let http = http_client();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(10));
             let ts = now_unix();
             let signature =
                 thread_identity.sign(&abhiverse_protocol::heartbeat_message(&device_id, ts));
             let url = format!("{api_url}/devices/{device_id}/heartbeat");
-            match ureq::post(&url)
+            match http
+                .post(&url)
                 .send_json(serde_json::json!({ "timestamp": ts, "signature": signature }))
             {
                 Ok(_) => {}
@@ -121,10 +140,10 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
         identity.info.name, identity.info.device_id
     );
 
-    let created: abhiverse_protocol::CreatePairingResponse =
-        ureq::post(&format!("{api_url}/pairing/requests"))
-            .send_json(serde_json::json!({ "agent": identity.info }))?
-            .into_json()?;
+    let created: abhiverse_protocol::CreatePairingResponse = http_client()
+        .post(&format!("{api_url}/pairing/requests"))
+        .send_json(serde_json::json!({ "agent": identity.info }))?
+        .into_json()?;
     println!();
     println!("  Pairing code: {}", created.code);
     println!("  Enter this code in the Abhiverse app within 5 minutes,");
@@ -151,10 +170,19 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         std::thread::sleep(Duration::from_secs(2));
-        let view: abhiverse_protocol::PairingView =
-            ureq::get(&format!("{api_url}/pairing/{}", created.pairing_id))
-                .call()?
-                .into_json()?;
+        let view: abhiverse_protocol::PairingView = match http_client()
+            .get(&format!("{api_url}/pairing/{}", created.pairing_id))
+            .call()
+        {
+            Ok(resp) => resp.into_json()?,
+            Err(ureq::Error::Status(404, _)) => {
+                // Pruned after expiry (see API retention): same
+                // outcome as an expired code.
+                println!("Pairing code expired. Run --pair again for a new code.");
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
         match view.status {
             PairingStatus::Claimed if !decided => {
                 decided = true;
@@ -178,7 +206,9 @@ fn run_pairing(api_url: &str) -> Result<(), Box<dyn std::error::Error>> {
                         identity.sign(&pairing_reject_message(&created.pairing_id, &created.code)),
                     )
                 };
-                ureq::post(&url).send_json(serde_json::json!({ "signature": sig }))?;
+                http_client()
+                    .post(&url)
+                    .send_json(serde_json::json!({ "signature": sig }))?;
                 if !approve {
                     println!("Pairing rejected.");
                     return Ok(());
@@ -253,7 +283,8 @@ fn run_send_file(
         ts,
         &request_id,
     );
-    let view: abhiverse_protocol::TransferView = ureq::post(&format!("{api}/transfers"))
+    let view: abhiverse_protocol::TransferView = http_client()
+        .post(&format!("{api}/transfers"))
         .set("x-abhiverse-timestamp", &ts.to_string())
         .set("x-abhiverse-signature", &identity.sign(&message))
         .send_json(serde_json::json!({
@@ -283,13 +314,14 @@ fn run_send_file(
         let chunk_hash = abhiverse_file_transfer::sha256_hex(&buf);
         let message =
             abhiverse_protocol::chunk_upload_message(&view.transfer_id, index, &chunk_hash, ts);
-        ureq::put(&format!(
-            "{api}/transfers/{}/chunks/{index}",
-            view.transfer_id
-        ))
-        .set("x-abhiverse-timestamp", &ts.to_string())
-        .set("x-abhiverse-signature", &identity.sign(&message))
-        .send_bytes(&buf)?;
+        http_transfer_client()
+            .put(&format!(
+                "{api}/transfers/{}/chunks/{index}",
+                view.transfer_id
+            ))
+            .set("x-abhiverse-timestamp", &ts.to_string())
+            .set("x-abhiverse-signature", &identity.sign(&message))
+            .send_bytes(&buf)?;
         println!("  chunk {}/{} uploaded", index + 1, total);
     }
     if total == 0 {
@@ -298,12 +330,12 @@ fn run_send_file(
 
     let ts = abhiverse_protocol::now_unix();
     let message = abhiverse_protocol::transfer_complete_message(&view.transfer_id, ts);
-    let done: abhiverse_protocol::TransferView =
-        ureq::post(&format!("{api}/transfers/{}/complete", view.transfer_id))
-            .set("x-abhiverse-timestamp", &ts.to_string())
-            .set("x-abhiverse-signature", &identity.sign(&message))
-            .send_json(serde_json::json!({}))?
-            .into_json()?;
+    let done: abhiverse_protocol::TransferView = http_client()
+        .post(&format!("{api}/transfers/{}/complete", view.transfer_id))
+        .set("x-abhiverse-timestamp", &ts.to_string())
+        .set("x-abhiverse-signature", &identity.sign(&message))
+        .send_json(serde_json::json!({}))?
+        .into_json()?;
     println!(
         "Sent '{}' — server verified the file hash (status: {:?}).",
         file_name, done.status
@@ -325,10 +357,15 @@ fn run_receive(
     };
     let api = &record.api_url;
     let device_id = &identity.info.device_id;
-    let list: abhiverse_protocol::TransferListResponse =
-        ureq::get(&format!("{api}/transfers?for={device_id}"))
-            .call()?
-            .into_json()?;
+    let ts = abhiverse_protocol::now_unix();
+    let list_path = format!("/transfers?for={device_id}&as={device_id}");
+    let list_message = abhiverse_protocol::signed_get_message(&list_path, device_id, ts);
+    let list: abhiverse_protocol::TransferListResponse = http_client()
+        .get(&format!("{api}{list_path}"))
+        .set("x-abhiverse-timestamp", &ts.to_string())
+        .set("x-abhiverse-signature", &identity.sign(&list_message))
+        .call()?
+        .into_json()?;
     let receive_dir = data_dir.join("received");
     std::fs::create_dir_all(&receive_dir)?;
     let mut handled = 0;
@@ -368,15 +405,16 @@ fn run_receive(
             let ts = abhiverse_protocol::now_unix();
             let message = abhiverse_protocol::chunk_download_message(&view.transfer_id, index, ts);
             let mut bytes = Vec::new();
-            ureq::get(&format!(
-                "{api}/transfers/{}/chunks/{index}",
-                view.transfer_id
-            ))
-            .set("x-abhiverse-timestamp", &ts.to_string())
-            .set("x-abhiverse-signature", &identity.sign(&message))
-            .call()?
-            .into_reader()
-            .read_to_end(&mut bytes)?;
+            http_transfer_client()
+                .get(&format!(
+                    "{api}/transfers/{}/chunks/{index}",
+                    view.transfer_id
+                ))
+                .set("x-abhiverse-timestamp", &ts.to_string())
+                .set("x-abhiverse-signature", &identity.sign(&message))
+                .call()?
+                .into_reader()
+                .read_to_end(&mut bytes)?;
             abhiverse_file_transfer::write_chunk(&receive_dir, &view.transfer_id, index, &bytes)?;
             progress.received.push(index);
             progress.save(&progress_path)?;
@@ -421,7 +459,8 @@ fn run_revoke(
     let ts = now_unix();
     let signature = identity.sign(&abhiverse_protocol::revoke_message(device_id, ts));
     let url = format!("{}/devices/{}", record.api_url, device_id);
-    match ureq::request("DELETE", &url)
+    match http_client()
+        .request("DELETE", &url)
         .send_json(serde_json::json!({ "timestamp": ts, "signature": signature }))
     {
         Ok(_) => {
