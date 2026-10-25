@@ -6,6 +6,44 @@ real-device run (physical Windows laptop + Android phone) verifies
 the WebRTC media path, DXGI capture, SendInput injection, and the
 APK build. Dates are IST.
 
+## Unreleased
+
+Controller-app audit + add-ons (four-lens review: user, security,
+investor, competitor):
+
+- **Real file sending.** The send dialog used to send typed text
+  only; it now picks real files via the system file picker
+  (file_picker 11), with a 1 GB client-side guard matching the
+  server cap and chunk progress as before.
+- **In-app server settings.** The API URL is no longer
+  build-time-only: the app saves a user-chosen server URL in
+  secure storage and rebuilds its clients around it without a
+  restart (reset to the build default included). This is what
+  makes a release APK usable outside the emulator.
+- **Endpoint guard.** Public `http` URLs are refused before any
+  request goes out; LAN `http` shows a warning; `https` is
+  unrestricted. The guard is unit-tested across loopback,
+  private, link-local and public ranges.
+- **Download-name sanitization.** Incoming file names are
+  reduced to a basename before any disk write (defense in depth
+  beside the server's own sanitization).
+- **Server errors surfaced.** The client used to replace every
+  error body with a bare HTTP status; it now shows the server's
+  own message (including the clock-sync hint).
+- **QR parser tightened.** Only the agent's two shapes are
+  accepted (bare code, `abhiverse://pair?code=`); arbitrary text
+  containing six digits no longer starts a pairing claim. After
+  a claim, a dialog names the target computer and warns the user
+  to approve only on their own machine.
+- **Responsive tests.** The home screen and dialogs are now
+  widget-tested at six sizes (320×568 small phone through
+  1280×800 tablet landscape) with zero overflow; dialogs scroll
+  on small screens.
+- **Docs:** `docs/windows-defender.md` (Defender/SmartScreen/
+  Play Protect posture + signing path), `PITCH.md` (honest
+  one-pager: real numbers, real gaps).
+- Tests: Flutter 19 → 37 (+1 skipped); analyze clean.
+
 ## v0.5.4 — 2026-10-25 — production hardening
 
 Security audit fixes, from a full in-depth audit (code + tests +
