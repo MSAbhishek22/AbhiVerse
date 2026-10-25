@@ -13,7 +13,10 @@ investor, competitor):
 
 - **Real file sending.** The send dialog used to send typed text
   only; it now picks real files via the system file picker
-  (file_picker 11), with a 1 GB client-side guard matching the
+  (file_selector, the Flutter team's own picker — file_picker was
+  dropped after CI run #75 proved its Android module pins Kotlin 1.8,
+  which cannot build under the app's AGP 9 / Gradle 9 toolchain),
+  with a 1 GB client-side guard matching the
   server cap and chunk progress as before.
 - **In-app server settings.** The API URL is no longer
   build-time-only: the app saves a user-chosen server URL in
