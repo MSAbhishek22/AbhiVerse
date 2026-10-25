@@ -457,3 +457,25 @@ pub fn session_create_message(
         "abhiverse-session-create:{device_id}:{controller_id}:{offer_sha256}:{timestamp}:{request_id}"
     )
 }
+
+/// Signed-GET message: the caller signs the exact request path +
+/// query it sends (e.g. `/sessions/<id>?as=<caller>&after=3`),
+/// so a signed read cannot be transplanted onto another resource.
+/// GETs are idempotent reads, so the API verifies the signature
+/// and timestamp but does NOT record it for replay protection —
+/// polling loops (session/ICE, every 700–800 ms) would otherwise
+/// trip on same-second timestamps.
+pub fn signed_get_message(path_and_query: &str, caller_id: &str, timestamp: i64) -> String {
+    format!("abhiverse-get:{path_and_query}:{caller_id}:{timestamp}")
+}
+
+/// ICE trickle message: the candidate is hashed so over-long
+/// candidate strings stay out of the signed payload.
+pub fn ice_candidate_message(
+    session_id: &str,
+    from_id: &str,
+    candidate_sha256: &str,
+    timestamp: i64,
+) -> String {
+    format!("abhiverse-ice:{session_id}:{from_id}:{candidate_sha256}:{timestamp}")
+}
