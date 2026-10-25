@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/api_client.dart';
+import '../../core/endpoint_security.dart';
+import '../../core/file_names.dart';
 import '../../core/health_client.dart';
 import 'scan_page.dart';
 import '../remote/remote_viewer.dart';
@@ -15,10 +18,21 @@ enum AbhiverseConnectionState { loading, connected, unreachable }
 /// coordination API, the paired-device list with presence
 /// (Tasks 002–004), and pairing by 6-digit code (Task 003).
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.healthClient, this.apiClient});
+  const HomeScreen({
+    super.key,
+    required this.healthClient,
+    this.apiClient,
+    this.onEndpointChanged,
+  });
 
   final HealthClient healthClient;
   final ApiClient? apiClient;
+
+  /// Called with the new server URL (or null to reset to the build
+  /// default) when the user saves server settings. Null when the
+  /// app cannot rebuild its clients (tests), in which case the
+  /// settings entry is hidden.
+  final Future<void> Function(String?)? onEndpointChanged;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -32,6 +46,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<TransferView> _incoming = const [];
   String? _devicesError;
   String? _notice;
+  String? _endpointWarning;
 
   @override
   void initState() {
@@ -43,7 +58,21 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _state = AbhiverseConnectionState.loading;
       _error = null;
+      _endpointWarning = null;
     });
+    // Refuse a dangerous endpoint before any request goes out: an
+    // http URL to a public host would send pairing codes and files
+    // in the clear (see core/endpoint_security.dart).
+    final guard = checkApiBaseUrl(widget.healthClient.config.apiBaseUrl);
+    if (guard.blocked) {
+      if (!mounted) return;
+      setState(() {
+        _error = guard.message;
+        _state = AbhiverseConnectionState.unreachable;
+      });
+      return;
+    }
+    _endpointWarning = guard.warning;
     try {
       final health = await widget.healthClient.fetchHealth();
       if (!mounted) return;
@@ -86,43 +115,47 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Pair a device'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Run `abhiverse-agent --pair` on your computer and enter '
-              'the 6-digit code it shows.',
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: codeController,
-              keyboardType: TextInputType.number,
-              maxLength: 6,
-              decoration: const InputDecoration(labelText: 'Pairing code'),
-            ),
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'This phone\'s name'),
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Scan QR code instead'),
-                onPressed: () async {
-                  final scanned = await Navigator.of(context).push<String>(
-                    MaterialPageRoute(
-                      builder: (_) => const ScanPairingPage(),
-                    ),
-                  );
-                  if (scanned != null) {
-                    codeController.text = scanned;
-                  }
-                },
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Run `abhiverse-agent --pair` on your computer and enter '
+                'the 6-digit code it shows.',
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              TextField(
+                controller: codeController,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                decoration: const InputDecoration(labelText: 'Pairing code'),
+              ),
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'This phone\'s name',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('Scan QR code instead'),
+                  onPressed: () async {
+                    final scanned = await Navigator.of(context).push<String>(
+                      MaterialPageRoute(
+                        builder: (_) => const ScanPairingPage(),
+                      ),
+                    );
+                    if (scanned != null) {
+                      codeController.text = scanned;
+                    }
+                  },
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -130,10 +163,10 @@ class _HomeScreenState extends State<HomeScreen> {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(
-              context,
-              (codeController.text.trim(), nameController.text.trim()),
-            ),
+            onPressed: () => Navigator.pop(context, (
+              codeController.text.trim(),
+              nameController.text.trim(),
+            )),
             child: const Text('Pair'),
           ),
         ],
@@ -152,8 +185,27 @@ class _HomeScreenState extends State<HomeScreen> {
         controllerName: name.isEmpty ? 'My Phone' : name,
       );
       if (!mounted) return;
-      setState(() => _notice =
-          'Request sent to ${claim.agentName}. Approve it on the computer to finish pairing.');
+      // Show the agent's name prominently: a pairing claim goes to
+      // whichever computer owns the code, so the user must confirm
+      // this is their computer before approving anything there.
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Request sent to ${claim.agentName}'),
+          content: const Text(
+            'Approve it on that computer to finish pairing. Check the '
+            'name: if this is not your computer, do not approve it '
+            'there — and if it appears in your device list, revoke it.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
       await _loadDevices();
     } on AbhiverseApiException catch (e) {
       if (!mounted) return;
@@ -161,10 +213,96 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _showEndpointDialog() async {
+    final onChanged = widget.onEndpointChanged;
+    if (onChanged == null) return;
+    final urlController = TextEditingController(
+      text: widget.healthClient.config.apiBaseUrl,
+    );
+    var error = '';
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Server settings'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'The computer running the Abhiverse server. On your '
+                  'home Wi-Fi this is its LAN address, e.g. '
+                  'http://192.168.1.20:8080. A hosted server must use '
+                  'https.',
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: urlController,
+                  keyboardType: TextInputType.url,
+                  decoration: const InputDecoration(
+                    labelText: 'Server URL',
+                    hintText: 'http://192.168.1.20:8080',
+                  ),
+                ),
+                if (error.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(error, style: const TextStyle(color: Colors.red)),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, ''),
+              child: const Text('Reset to default'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final check = checkApiBaseUrl(urlController.text.trim());
+                if (check.blocked) {
+                  setDialogState(() => error = check.message ?? 'Bad URL.');
+                  return;
+                }
+                Navigator.pop(dialogContext, urlController.text.trim());
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    // Cancel/backdrop pops null (do nothing); Reset pops '' and
+    // Save pops the URL string.
+    if (result == null || !mounted) return;
+    if (result.isEmpty) {
+      await onChanged(null);
+    } else {
+      await onChanged(result);
+    }
+    if (!mounted) return;
+    setState(() => _notice = 'Server changed — reconnecting…');
+    await _check();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('ABHIVERSE')),
+      appBar: AppBar(
+        title: const Text('ABHIVERSE'),
+        actions: [
+          if (widget.onEndpointChanged != null)
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: 'Server settings',
+              onPressed: _showEndpointDialog,
+            ),
+        ],
+      ),
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -180,6 +318,12 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 8),
               const Text(
                 'One control centre. Every device. Anywhere.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Free & open source · No account · No subscription',
+                style: Theme.of(context).textTheme.bodySmall,
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 32),
@@ -225,6 +369,26 @@ class _HomeScreenState extends State<HomeScreen> {
                 Text('Backend: ${_health!.service}'),
                 Text('Backend version: ${_health!.version}'),
                 Text('Protocol: v${_health!.protocolVersion}'),
+                if (_endpointWarning != null) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.warning_amber_outlined,
+                        color: Colors.orange,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          _endpointWarning!,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 8),
                 TextButton(onPressed: _check, child: const Text('Refresh')),
               ],
@@ -248,10 +412,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 8),
                 Text(_error ?? 'Unknown error', textAlign: TextAlign.center),
                 const SizedBox(height: 8),
-                ElevatedButton(
-                  onPressed: _check,
-                  child: const Text('Retry'),
-                ),
+                ElevatedButton(onPressed: _check, child: const Text('Retry')),
               ],
             ),
           ),
@@ -266,28 +427,82 @@ class _HomeScreenState extends State<HomeScreen> {
     final contentController = TextEditingController();
     var sending = false;
     var progress = '';
+    List<int>? pickedBytes;
+    var pickedName = '';
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: Text('Send a file to ${device.name}'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(labelText: 'File name'),
-              ),
-              TextField(
-                controller: contentController,
-                maxLines: 4,
-                decoration: const InputDecoration(labelText: 'Text content'),
-              ),
-              if (sending) ...[
-                const SizedBox(height: 12),
-                Text(progress),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(labelText: 'File name'),
+                ),
+                TextField(
+                  controller: contentController,
+                  maxLines: 4,
+                  decoration: const InputDecoration(labelText: 'Text content'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.attach_file),
+                  label: Text(
+                    pickedName.isEmpty ? 'Pick a file' : 'Picked: $pickedName',
+                  ),
+                  onPressed: sending
+                      ? null
+                      : () async {
+                          final result = await FilePicker.pickFiles(
+                            withData: true,
+                          );
+                          if (result == null || result.files.isEmpty) {
+                            return;
+                          }
+                          final picked = result.files.single;
+                          final bytes =
+                              picked.bytes ??
+                              (picked.path != null
+                                  ? await File(picked.path!).readAsBytes()
+                                  : null);
+                          if (bytes == null) {
+                            setDialogState(
+                              () => progress = 'Could not read that file.',
+                            );
+                            return;
+                          }
+                          final tooBig = checkTransferSize(bytes.length);
+                          if (tooBig != null) {
+                            setDialogState(() => progress = tooBig);
+                            return;
+                          }
+                          setDialogState(() {
+                            pickedBytes = bytes;
+                            pickedName = picked.name;
+                            progress = '';
+                            if (nameController.text.trim().isEmpty ||
+                                nameController.text.trim() == 'note.txt') {
+                              nameController.text = sanitizeDownloadName(
+                                picked.name,
+                              );
+                            }
+                          });
+                        },
+                ),
+                if (pickedName.isNotEmpty)
+                  const Text(
+                    'The picked file will be sent instead of the text above.',
+                    textAlign: TextAlign.center,
+                  ),
+                if (sending || progress.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(progress),
+                ],
               ],
-            ],
+            ),
           ),
           actions: [
             TextButton(
@@ -303,22 +518,27 @@ class _HomeScreenState extends State<HomeScreen> {
                         progress = 'Preparing…';
                       });
                       try {
-                        final bytes = utf8.encode(contentController.text);
+                        final bytes =
+                            pickedBytes ?? utf8.encode(contentController.text);
+                        final rawName = nameController.text.trim();
                         final view = await api.sendBytes(
                           toId: device.deviceId,
-                          fileName: nameController.text.trim().isEmpty
+                          fileName: rawName.isEmpty
                               ? 'note.txt'
-                              : nameController.text.trim(),
+                              : sanitizeDownloadName(rawName),
                           bytes: bytes,
                           onProgress: (sent, total) => setDialogState(
-                              () => progress = 'Chunk $sent of $total sent'),
+                            () => progress = 'Chunk $sent of $total sent',
+                          ),
                         );
                         if (!dialogContext.mounted) return;
                         Navigator.pop(dialogContext);
                         if (!mounted) return;
-                        setState(() => _notice = view.status == 'complete'
-                            ? 'Sent ${view.fileName} — the server verified its SHA-256 hash.'
-                            : 'Transfer finished with status: ${view.status}');
+                        setState(
+                          () => _notice = view.status == 'complete'
+                              ? 'Sent ${view.fileName} — the server verified its SHA-256 hash.'
+                              : 'Transfer finished with status: ${view.status}',
+                        );
                       } on AbhiverseApiException catch (e) {
                         setDialogState(() {
                           sending = false;
@@ -376,11 +596,17 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final bytes = await api.downloadBytes(view);
       final dir = await getApplicationDocumentsDirectory();
-      final file = File('${dir.path}/${view.fileName}');
+      // Never trust a network-supplied name for a disk path: the
+      // server sanitizes too, but basename-only here is the second
+      // lock on the door (see core/file_names.dart).
+      final safeName = sanitizeDownloadName(view.fileName);
+      final file = File('${dir.path}/$safeName');
       await file.writeAsBytes(bytes, flush: true);
       if (!mounted) return;
-      setState(() => _notice =
-          'Saved & SHA-256 verified: ${view.fileName} (${bytes.length} bytes)');
+      setState(
+        () => _notice =
+            'Saved & SHA-256 verified: $safeName (${bytes.length} bytes)',
+      );
     } on AbhiverseApiException catch (e) {
       if (!mounted) return;
       setState(() => _notice = e.message);
@@ -418,7 +644,10 @@ class _HomeScreenState extends State<HomeScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Your devices', style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Your devices',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             IconButton(
               onPressed: _loadDevices,
               icon: const Icon(Icons.refresh),
@@ -454,13 +683,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     onPressed: widget.apiClient == null
                         ? null
                         : () => Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => RemoteViewerPage(
-                                  device: d,
-                                  api: widget.apiClient!,
-                                ),
+                            MaterialPageRoute(
+                              builder: (_) => RemoteViewerPage(
+                                device: d,
+                                api: widget.apiClient!,
                               ),
                             ),
+                          ),
                   ),
                   IconButton(
                     icon: const Icon(Icons.upload_file),
