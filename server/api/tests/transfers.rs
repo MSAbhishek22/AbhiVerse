@@ -2,7 +2,7 @@ use abhiverse_file_transfer::{sha256_hex, total_chunks, CHUNK_SIZE};
 use abhiverse_identity::{ensure_identity, DeviceIdentity};
 use abhiverse_protocol::{
     chunk_download_message, chunk_upload_message, now_unix, pairing_approve_message,
-    transfer_complete_message, transfer_create_message, DeviceKind,
+    signed_get_message, transfer_complete_message, transfer_create_message, DeviceKind,
 };
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -79,6 +79,11 @@ fn signed_at(id: &DeviceIdentity, message: &str, ts: i64) -> Vec<(String, String
         ("x-abhiverse-timestamp".into(), ts.to_string()),
         ("x-abhiverse-signature".into(), id.sign(message)),
     ]
+}
+
+fn signed_get(id: &DeviceIdentity, path: &str) -> Vec<(String, String)> {
+    let ts = now_unix();
+    signed_at(id, &signed_get_message(path, &id.info.device_id, ts), ts)
 }
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -184,55 +189,80 @@ async fn controller_to_agent_with_resume_and_signed_download() {
     assert_eq!(status, StatusCode::CREATED);
     let tid = view["transfer_id"].as_str().unwrap().to_string();
 
-    // Upload chunks 0 and 2 only -> status shows the gap (resume source).
+    // Upload chunks 0 and 2 only (signed) -> status shows the gap.
     for index in [0u32, 2] {
         let start = (index as u64 * CHUNK_SIZE) as usize;
         let end = (start + CHUNK_SIZE as usize).min(data.len());
+        let ts = now_unix();
+        let headers = signed_at(
+            &controller,
+            &chunk_upload_message(&tid, index, &sha256_hex(&data[start..end]), ts),
+            ts,
+        );
         let s = call_bytes(
             app.clone(),
             &format!("/transfers/{tid}/chunks/{index}"),
             data[start..end].to_vec(),
-            vec![],
+            headers,
         )
         .await;
         assert_eq!(s, StatusCode::OK);
     }
+    let get_path = format!("/transfers/{tid}?as={}", controller.info.device_id);
     let (_, view) = call(
         app.clone(),
         Method::GET,
-        &format!("/transfers/{tid}"),
+        &get_path,
         None,
-        vec![],
+        signed_get(&controller, &get_path),
     )
     .await;
     assert_eq!(view["received_chunks"], json!([0, 2]));
 
-    // Completing early is a conflict.
+    // Completing early is a conflict (signed complete).
+    let ts = now_unix();
+    let headers = signed_at(&controller, &transfer_complete_message(&tid, ts), ts);
     let (status, _) = call(
         app.clone(),
         Method::POST,
         &format!("/transfers/{tid}/complete"),
         None,
-        vec![],
+        headers,
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     // Upload the missing chunk, then complete: server verifies the hash.
+    let ts = now_unix();
+    let headers = signed_at(
+        &controller,
+        &chunk_upload_message(
+            &tid,
+            1,
+            &sha256_hex(&data[CHUNK_SIZE as usize..2 * CHUNK_SIZE as usize]),
+            ts,
+        ),
+        ts,
+    );
     let s = call_bytes(
         app.clone(),
         &format!("/transfers/{tid}/chunks/1"),
         data[CHUNK_SIZE as usize..2 * CHUNK_SIZE as usize].to_vec(),
-        vec![],
+        headers,
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    // Distinct timestamp from the early complete above: replay
+    // protection burns a signature for its second, so a retry in
+    // the same second would (correctly) be refused as a replay.
+    let ts = now_unix() + 1;
+    let headers = signed_at(&controller, &transfer_complete_message(&tid, ts), ts);
     let (status, view) = call(
         app.clone(),
         Method::POST,
         &format!("/transfers/{tid}/complete"),
         None,
-        vec![],
+        headers,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -337,19 +367,27 @@ async fn agent_to_controller_requires_signatures() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["status"], "complete");
 
-    // Controller downloads without a signature (transfer-ID capability).
+    // Controller downloads: unsigned is refused, signed works.
+    let (status, _) = get_bytes(app.clone(), &format!("/transfers/{tid}/chunks/2"), vec![]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let ts = now_unix();
+    let headers = signed_at(&controller, &chunk_download_message(&tid, 2, ts), ts);
     let (status, bytes) =
-        get_bytes(app.clone(), &format!("/transfers/{tid}/chunks/2"), vec![]).await;
+        get_bytes(app.clone(), &format!("/transfers/{tid}/chunks/2"), headers).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes, data[2 * CHUNK_SIZE as usize..]);
 
-    // Listing by recipient shows the transfer.
+    // Listing by recipient shows the transfer (signed).
+    let list_path = format!(
+        "/transfers?for={}&as={}",
+        controller.info.device_id, controller.info.device_id
+    );
     let (_, list) = call(
         app.clone(),
         Method::GET,
-        &format!("/transfers?for={}", controller.info.device_id),
+        &list_path,
         None,
-        vec![],
+        signed_get(&controller, &list_path),
     )
     .await;
     assert_eq!(list["transfers"].as_array().unwrap().len(), 1);
@@ -387,29 +425,38 @@ async fn corrupt_upload_fails_completion_and_unknown_senders_are_rejected() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let tid = view["transfer_id"].as_str().unwrap().to_string();
+    let ts = now_unix();
+    let headers = signed_at(
+        &controller,
+        &chunk_upload_message(&tid, 0, &sha256_hex(b"xyz"), ts),
+        ts,
+    );
     let s = call_bytes(
         app.clone(),
         &format!("/transfers/{tid}/chunks/0"),
         b"xyz".to_vec(),
-        vec![],
+        headers,
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    let ts = now_unix();
+    let headers = signed_at(&controller, &transfer_complete_message(&tid, ts), ts);
     let (status, _) = call(
         app.clone(),
         Method::POST,
         &format!("/transfers/{tid}/complete"),
         None,
-        vec![],
+        headers,
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let get_path = format!("/transfers/{tid}?as={}", controller.info.device_id);
     let (_, view) = call(
         app.clone(),
         Method::GET,
-        &format!("/transfers/{tid}"),
+        &get_path,
         None,
-        vec![],
+        signed_get(&controller, &get_path),
     )
     .await;
     assert_eq!(view["status"], "failed");
