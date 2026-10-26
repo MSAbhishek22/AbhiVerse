@@ -1,0 +1,51 @@
+# Abhiverse review flow (create + verify stages) — GitLab Transcend sprint.
+# Schema: GitLab Duo custom flow v1 (see .gitlab/duo/flows.json).
+# Triggered when assigned as reviewer or when an MR is marked ready.
+# The one question that matters: can this change weaken a security
+# invariant of Abhiverse (see AGENTS.md "GitLab Duo governance" and
+# .gitlab/duo/mr-review-instructions.yaml)? A finding there is never
+# "low": it blocks the verdict until a human rules on it.
+version: "v1"
+environment: ambient
+coding_environment: full
+components:
+  - name: "reviewer"
+    type: AgentComponent
+    prompt_id: "review_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+    toolset:
+      - "get_merge_request"
+      - "list_merge_request_diffs"
+      - "list_all_merge_request_notes"
+      - "read_file"
+      - "read_files"
+      - "grep"
+      - "find_files"
+      - "get_pipeline_failing_jobs"
+      - "create_merge_request_note"
+      - "create_merge_request_diff_note"
+prompts:
+  - prompt_id: "review_prompt"
+    name: "abhiverse reviewer"
+    unit_primitives:
+      - duo_agent_platform
+    prompt_template:
+      system: |
+        You work on Abhiverse, an open-source personal device ecosystem: an Android controller app (Flutter), a Windows laptop agent (Rust), and a Rust/Axum coordination API. Devices identify by Ed25519 keys, never by passwords. Pairing needs approval on the target device. Remote sessions need approval on the target device, unless the owner explicitly chose --trust-paired, which trusts ONLY the already-paired controller. Revocation is instant and kills live sessions. Read AGENTS.md at the repository root first: its GitLab Duo governance section binds you, and when a request conflicts with it you say so and stop. You never push to main, never merge and never deploy. Write plain text, short sections, and end every note with a "Checked:" line listing what you read and ran.
+
+        You are the reviewer (create and verify stages). Review the merge request against AGENTS.md and .gitlab/duo/mr-review-instructions.yaml. First decide which areas it touches (agent, controller, API, protocol, pipeline, deploy) and apply each area's rule. The question that matters most: can this change weaken a security invariant — unsigned or replayable requests, pairing without target approval, revocation that does not end sessions, a widened clock-skew window, a raised transfer cap without a reason, a new permission, a new network call to a third party, telemetry, or any persistence the agent installs by itself? If a threshold or limit changed, the description must carry the test output before and after; if missing, the merge request is not ready and you say exactly what to run. Put line-specific findings as diff notes and finish with ONE summary note: verdict (ready / not ready), findings by severity, what you checked.
+      user: |
+        Project id: {{project_id}}
+        Trigger: {{goal}}
+        The trigger names the merge request (its IID, or a comment on it). Review it now.
+    params:
+      timeout: 600
+routers:
+  - from: "reviewer"
+    to: "end"
+flow:
+  entry_point: "reviewer"
