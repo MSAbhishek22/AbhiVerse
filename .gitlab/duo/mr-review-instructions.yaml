@@ -1,0 +1,40 @@
+# Per-path review rules for the abhiverse-review flow.
+# (Duo excludes .gitlab/duo/ from its own context, so the binding rules
+# also live in AGENTS.md "GitLab Duo governance". This file is the
+# detailed per-path companion; AGENTS.md wins on any conflict.)
+rules:
+  - paths:
+      - "agents/windows/**"
+      - "crates/protocol/**"
+      - "crates/identity/**"
+    checks:
+      - "Every new request/response path must be signed and verified; no unsigned exceptions."
+      - "Pairing still needs approval on the target device; sessions still need approval unless --trust-paired (paired controller only)."
+      - "Revocation must end live sessions, not just block future ones."
+      - "No new persistence the agent installs by itself (no Startup, registry, service, or task)."
+      - "No weakening of a security test to make it pass (replay window, throttle, transfer cap, signature checks)."
+  - paths:
+      - "apps/controller/**"
+    checks:
+      - "No new Android permission without justification; today only CAMERA (QR scan) and INTERNET are allowed."
+      - "Public HTTP endpoints stay refused; LAN HTTP stays warned; HTTPS anywhere is the happy path."
+      - "Downloaded file names stay sanitized; the 1 GiB transfer cap stays enforced."
+  - paths:
+      - "server/api/**"
+    checks:
+      - "Every endpoint states who may call it (agent, controller, public) and what signature it verifies."
+      - "Public-by-design endpoints (health, device names+presence, pairing create/poll) stay minimal; nothing else becomes public by accident."
+      - "Retention and pruning rules (sessions, transfers, pairings) stay intact."
+  - paths:
+      - ".gitlab-ci.yml"
+      - "deploy/**"
+      - ".gitlab/duo/**"
+    checks:
+      - "No secret, token, or credential in any file; CI variables are masked and protected only."
+      - "Deploy jobs stay manual (a human approves production); agents never deploy."
+  - paths:
+      - "docs/**"
+      - "README.md"
+    checks:
+      - "No claim the repo cannot back: test counts, CI status, and verification state must match reality."
+      - "Anything not yet verified on real hardware stays labelled as such."
