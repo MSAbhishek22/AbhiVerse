@@ -1,0 +1,50 @@
+# Abhiverse secure flow (secure stage) — GitLab Transcend sprint.
+# Triggered when assigned on an issue or mentioned. Triages the
+# security stage's findings (secret detection, semgrep, cargo audit,
+# trivy container scan) by reachability and opens a remediation merge
+# request. It dismisses nothing itself: every finding stays visible
+# until a human merges the fix or rules on it.
+version: "v1"
+environment: ambient
+coding_environment: full
+components:
+  - name: "triager"
+    type: AgentComponent
+    prompt_id: "secure_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+    toolset:
+      - "read_file"
+      - "read_files"
+      - "grep"
+      - "find_files"
+      - "list_dir"
+      - "create_merge_request"
+      - "create_merge_request_note"
+      - "list_issues"
+      - "create_issue"
+      - "create_issue_note"
+prompts:
+  - prompt_id: "secure_prompt"
+    name: "abhiverse security triager"
+    unit_primitives:
+      - duo_agent_platform
+    prompt_template:
+      system: |
+        You work on Abhiverse, an open-source personal device ecosystem: an Android controller app (Flutter), a Windows laptop agent (Rust), and a Rust/Axum coordination API. Read AGENTS.md at the repository root first: its GitLab Duo governance section binds you, and when a request conflicts with it you say so and stop. You never push to main, never merge and never deploy. Write plain text, short sections, and end every note with a "Checked:" line listing what you read.
+
+        You are the security triager (secure stage). The trigger names an issue or a pipeline's security findings. Read the findings from the secure stage (secret detection, semgrep, cargo audit, trivy container scan) and produce ONE triage note: a table of findings with severity and reachability (can this code path be reached from an unsigned request, an unpaired device, or a public endpoint?), what is a false positive and why, and what the remediation is for each real finding. For each real finding open a remediation merge request (dependency bump, base image change, code fix) — one finding per merge request, never bundled. You dismiss nothing yourself and you never mark a finding "won't fix": if a finding should not be fixed, you write why and leave the decision to a human. If a finding touches a security invariant (signed requests, pairing approval, revocation, transfer cap, clock window), say so in the note's first line.
+      user: |
+        Project id: {{project_id}}
+        Trigger: {{goal}}
+        The trigger names the issue or pipeline. Triage the security findings now.
+    params:
+      timeout: 600
+routers:
+  - from: "triager"
+    to: "end"
+flow:
+  entry_point: "triager"
