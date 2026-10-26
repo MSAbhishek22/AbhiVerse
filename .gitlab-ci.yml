@@ -1,0 +1,200 @@
+# Abhiverse on GitLab CI — the post-code pipeline (Transcend sprint).
+#
+# Stages mirror the nine post-code lifecycle stages the hackathon
+# judges on: plan + create (the Duo flows), verify, package, secure,
+# release, configure, monitor, govern (AGENTS.md + review rules).
+# The Duo flows themselves live in .gitlab/duo/flows/ and are applied
+# with deploy/duo_sync.py; this file is the deterministic pipeline
+# they watch, fix, triage, and report on.
+#
+# Design rules for this file:
+# - Every job that can run on a plain GitLab account DOES run there.
+#   Nothing here needs a paid tier: security scanning uses free
+#   tooling (secret detection template, semgrep, cargo audit, trivy).
+# - The deploy job is manual and skips cleanly when the GCP
+#   variables are absent, so the pipeline stays green on forks
+#   and on the free fallback repo.
+# - Agents never deploy and never merge: deploy is a manual job,
+#   merge is a human step. See AGENTS.md.
+
+# The secret-detection template's jobs use the default `test` stage,
+# so it must exist even though no job below names it directly.
+stages:
+  - verify
+  - test
+  - package
+  - secure
+  - release
+  - configure
+  - monitor
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  FLUTTER_ROOT: "/opt/flutter"
+
+# ---------------------------------------------------------------- verify
+rust-checks:
+  stage: verify
+  image: rust:1.99
+  cache:
+    key: cargo-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cargo/registry
+      - target/
+  script:
+    - cargo fmt --all --check
+    - cargo clippy --workspace --all-targets -- -D warnings
+    - cargo test --workspace --exclude abhiverse-controller
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+flutter-checks:
+  stage: verify
+  image: ghcr.io/cirruslabs/flutter:stable
+  cache:
+    key: flutter-$CI_COMMIT_REF_SLUG
+    paths:
+      - .pub-cache/
+  script:
+    - cd apps/controller
+    - flutter pub get
+    - flutter analyze
+    - flutter test
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+android-apk:
+  stage: verify
+  image: ghcr.io/cirruslabs/flutter:stable
+  cache:
+    key: flutter-$CI_COMMIT_REF_SLUG
+    paths:
+      - .pub-cache/
+  script:
+    - cd apps/controller
+    - flutter pub get
+    - flutter build apk --release
+  artifacts:
+    name: "abhiverse-controller-apk"
+    paths:
+      - apps/controller/build/app/outputs/flutter-apk/app-release.apk
+    expire_in: 30 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+validate-duo-flows:
+  stage: verify
+  image: python:3.12-slim
+  script:
+    - pip install -q pyyaml
+    - python3 deploy/duo_sync.py --check
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+# ---------------------------------------------------------------- secure
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+semgrep-scan:
+  stage: secure
+  image: semgrep/semgrep:latest
+  script:
+    - semgrep --config auto --error --exclude "*.lock" --exclude "target/" .
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+cargo-audit:
+  stage: secure
+  image: rust:1.99
+  script:
+    - cargo install --locked cargo-audit || true
+    - cargo audit --deny warnings || cargo audit
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+# ---------------------------------------------------------------- package
+build-api-image:
+  stage: package
+  image: docker:24
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build -t "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA" -f server/api/Dockerfile .
+    - docker push "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+trivy-image-scan:
+  stage: secure
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA"
+  needs:
+    - build-api-image
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+# ---------------------------------------------------------------- release
+# Manual on purpose: a human approves production (Supervised level).
+# Skips cleanly when the GCP variables are absent (forks, free repo).
+deploy-cloud-run:
+  stage: release
+  image: google/cloud-sdk:slim
+  # Audience = the full WIF provider resource name, set as a CI
+  # variable during the one-time WIF setup (see docs/transcend-sprint.md).
+  id_tokens:
+    GCP_ID_TOKEN:
+      aud: $GCP_WIF_AUDIENCE
+  script:
+    - bash deploy/cloudrun-deploy.sh
+  environment:
+    name: production
+    url: "$PRODUCTION_URL"
+  rules:
+    - if: $GCP_WIF_PROVIDER && $GCP_PROJECT_ID
+      when: manual
+    - when: never
+
+check-live:
+  stage: release
+  image: curlimages/curl:latest
+  script:
+    - test -n "$PRODUCTION_URL" || (echo "PRODUCTION_URL is not set" && exit 1)
+    - curl -fsS "$PRODUCTION_URL/health"
+    - "if curl -fsS \"$PRODUCTION_URL/this-path-does-not-exist\"; then echo 'nonsense path returned success, unexpected' && exit 1; else echo 'nonsense path correctly refused'; fi"
+  needs:
+    - deploy-cloud-run
+  rules:
+    - if: $GCP_WIF_PROVIDER && $GCP_PROJECT_ID
+      when: on_success
+    - when: never
+
+# ---------------------------------------------------------------- configure
+config-drift:
+  stage: configure
+  image: curlimages/curl:latest
+  script:
+    - test -n "$PRODUCTION_URL" || (echo "PRODUCTION_URL is not set, drift check skipped" && exit 0)
+    - bash deploy/check-drift.sh
+  # Fails on purpose when it finds and reconciles drift: the
+  # abhiverse-configure flow owns that case, not the fix flow.
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+
+# ---------------------------------------------------------------- monitor
+monitor-production:
+  stage: monitor
+  image: curlimages/curl:latest
+  script:
+    - test -n "$PRODUCTION_URL" || (echo "PRODUCTION_URL is not set, monitor skipped" && exit 0)
+    - curl -fsS "$PRODUCTION_URL/health"
+    - "if curl -fsS \"$PRODUCTION_URL/this-path-does-not-exist\"; then echo 'nonsense path returned success, unexpected' && exit 1; else echo 'nonsense path correctly refused'; fi"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
