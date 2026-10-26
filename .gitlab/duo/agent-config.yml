@@ -1,0 +1,10 @@
+# Execution settings for Duo flows on this project (read from the default branch).
+# The flow sandbox blocks outbound traffic by default. The release/monitor
+# flow must reach the live service to check /health and a nonsense path,
+# so exactly the production hostname is allowed here. Replace the
+# placeholder with the real deployed hostname once the service is live
+# (see docs/transcend-sprint.md), or the release flow will honestly
+# report "not verified" instead of guessing.
+network_policy:
+  allowed_domains:
+    - REPLACE-WITH-DEPLOY-HOSTNAME
