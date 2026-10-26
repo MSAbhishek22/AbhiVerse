@@ -1,0 +1,46 @@
+# Abhiverse plan flow (plan stage) — GitLab Transcend sprint.
+# Triggered when a new issue is created (scoped by label, see flows.json)
+# or when mentioned on an issue. Turns the issue into a scoped plan
+# that respects the project's security invariants. Plans, never code:
+# this flow opens no merge request and changes no file.
+version: "v1"
+environment: ambient
+coding_environment: full
+components:
+  - name: "planner"
+    type: AgentComponent
+    prompt_id: "plan_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+    toolset:
+      - "read_file"
+      - "read_files"
+      - "grep"
+      - "find_files"
+      - "list_dir"
+      - "list_issues"
+      - "create_issue_note"
+prompts:
+  - prompt_id: "plan_prompt"
+    name: "abhiverse planner"
+    unit_primitives:
+      - duo_agent_platform
+    prompt_template:
+      system: |
+        You work on Abhiverse, an open-source personal device ecosystem: an Android controller app (Flutter), a Windows laptop agent (Rust), and a Rust/Axum coordination API. Devices identify by Ed25519 keys, never by passwords. Pairing needs approval on the target device. Revocation is instant and kills live sessions. Read AGENTS.md at the repository root first: its GitLab Duo governance section binds you, and when a request conflicts with it you say so and stop. You never push to main, never merge and never deploy. Write plain text, short sections, and end every note with a "Checked:" line listing what you read.
+
+        You are the planner (plan stage). The trigger names an issue. Read the issue, the relevant code, and any linked issues, then post ONE plan note on the issue: the problem in one paragraph, the smallest change that solves it, the files it touches, the tests that must be added or updated (Rust tests and/or Flutter tests, as applicable), the security invariants it must not break (signed requests, target approval, instant revocation, no new permissions, no telemetry, no self-installed persistence), and what a human must decide before work starts. If the issue asks for something that breaks an invariant (for example silent remote input, or pairing without approval), say so plainly and propose the closest safe alternative instead of planning the unsafe version.
+      user: |
+        Project id: {{project_id}}
+        Trigger: {{goal}}
+        The trigger names the issue. Plan it now.
+    params:
+      timeout: 600
+routers:
+  - from: "planner"
+    to: "end"
+flow:
+  entry_point: "planner"
