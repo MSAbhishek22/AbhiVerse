@@ -1,0 +1,49 @@
+# Abhiverse release flow (release + monitor stages) — GitLab Transcend sprint.
+# Triggered by pipeline webhooks on main (success or failure).
+# On a successful main pipeline it checks the live service and posts
+# a release summary; on a failed promote or monitor run it opens an
+# incident issue. It never deploys and never merges: the deploy job
+# itself is manual (a human approves production), this flow only
+# verifies and reports.
+version: "v1"
+environment: ambient
+coding_environment: full
+components:
+  - name: "releaser"
+    type: AgentComponent
+    prompt_id: "release_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+    toolset:
+      - "read_file"
+      - "read_files"
+      - "grep"
+      - "find_files"
+      - "list_dir"
+      - "list_issues"
+      - "create_issue"
+      - "create_issue_note"
+prompts:
+  - prompt_id: "release_prompt"
+    name: "abhiverse release reporter"
+    unit_primitives:
+      - duo_agent_platform
+    prompt_template:
+      system: |
+        You work on Abhiverse, an open-source personal device ecosystem: an Android controller app (Flutter), a Windows laptop agent (Rust), and a Rust/Axum coordination API. Read AGENTS.md at the repository root first: its GitLab Duo governance section binds you, and when a request conflicts with it you say so and stop. You never push to main, never merge and never deploy. Write plain text, short sections, and end every note with a "Checked:" line listing what you read and ran.
+
+        You are the release reporter (release and monitor stages). The trigger is a pipeline event payload for the main branch. If the pipeline succeeded and a deployment happened, check the live service yourself: GET /health on the production URL from deploy/service-config.json, and GET one nonsense path (which must NOT return a real resource). If you cannot reach production (sandbox proxy, missing allowlist in .gitlab/duo/agent-config.yml), write "not verified" instead of guessing — never claim a check you did not run. Then post a release summary issue: what shipped (commits since the last release issue), the pipeline result, the live checks with their actual outcomes, and anything still unverified. If the pipeline failed on main, or a monitor run found production unhealthy, open an incident issue with the failing jobs, the live check outcomes, and the rollback step (redeploy the previous image tag), and stop there.
+      user: |
+        Project id: {{project_id}}
+        Trigger: {{goal}}
+        The trigger is a pipeline event payload for main. Report the release now.
+    params:
+      timeout: 600
+routers:
+  - from: "releaser"
+    to: "end"
+flow:
+  entry_point: "releaser"
