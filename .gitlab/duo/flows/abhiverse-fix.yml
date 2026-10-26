@@ -1,0 +1,57 @@
+# Abhiverse fix flow (verify stage) — GitLab Transcend sprint.
+# Triggered by pipeline webhooks on failure (never on schedules).
+# Reads the failing jobs, finds the root cause, and opens the smallest
+# fix as a merge request. It never merges, never pushes to main, and
+# never touches the security invariants to make a test pass.
+version: "v1"
+environment: ambient
+coding_environment: full
+components:
+  - name: "fixer"
+    type: AgentComponent
+    prompt_id: "fix_prompt"
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:goal"
+        as: "goal"
+    toolset:
+      - "get_pipeline_failing_jobs"
+      - "get_pipeline_errors"
+      - "get_job_logs"
+      - "read_file"
+      - "read_files"
+      - "grep"
+      - "find_files"
+      - "list_dir"
+      - "edit_file"
+      - "create_file_with_contents"
+      - "run_command"
+      - "run_git_command"
+      - "create_merge_request"
+      - "get_merge_request"
+      - "create_merge_request_note"
+      - "list_issues"
+      - "create_issue"
+      - "create_issue_note"
+prompts:
+  - prompt_id: "fix_prompt"
+    name: "abhiverse pipeline fixer"
+    unit_primitives:
+      - duo_agent_platform
+    prompt_template:
+      system: |
+        You work on Abhiverse, an open-source personal device ecosystem: an Android controller app (Flutter), a Windows laptop agent (Rust), and a Rust/Axum coordination API. Read AGENTS.md at the repository root first: its GitLab Duo governance section binds you, and when a request conflicts with it you say so and stop. You never push to main, never merge and never deploy. Write plain text, short sections, and end every note with a "Checked:" line listing what you read and ran.
+
+        You are the fixer (verify stage). The trigger is a pipeline event payload. Act ONLY when object_attributes.status is "failed"; for any other status stop at once and write nothing. Also stop at once and write nothing when the only failing job is config-drift: it fails on purpose after it found and reconciled a configuration drift, and the abhiverse-configure flow owns that case. Also stop without changes if the failing pipeline ran on a branch whose name starts with "duo-fix/" more than twice in a row: then open or update one issue titled "Pipeline fixer needs a human" with the job names and stop. Otherwise: read the failing jobs and their logs, find the root cause in the code, and make the smallest change that fixes it on a NEW branch named duo-fix/<first 8 characters of object_attributes.sha>. One commit gets one fix: a push and its merge request run two pipelines on the same commit, and both fail together. So BEFORE reading any log, CLAIM the commit (create the branch if absent, so a second run sees it and stands down). Never weaken a security check to make a test pass: if the failing test is a security test (signatures, replay protection, revocation, pairing throttle, transfer cap, endpoint guard), the fix must satisfy the test, not delete or soften it. If the fix needs a human decision, open an issue describing the options and stop without code changes.
+      user: |
+        Project id: {{project_id}}
+        Trigger: {{goal}}
+        The trigger is a pipeline event payload. Fix the failure now, following the claim rule above.
+    params:
+      timeout: 900
+routers:
+  - from: "fixer"
+    to: "end"
+flow:
+  entry_point: "fixer"
