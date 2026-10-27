@@ -119,11 +119,10 @@ No secret is ever read from a file, printed, or committed.
 - **Currencies:** USD, EUR, GBP, INR only. Recipient must be an email
   (PayPal payee email). Amounts need a symbol or currency word — a bare
   number is refused rather than guessed.
-- **Prototype status:** this directory is new, uncommitted working-tree
-  code. Per the repo's `AGENTS.md`, a human merges it (agents do not
-  merge or push to main), and the new third-party network calls
-  (PayPal Sandbox, LLM endpoint) need a human-approved reason recorded
-  in the merge request — this README is that proposal, not an approval.
+- **Prototype status:** merged to main on 2026-10-27 on the user's
+  authorization. The new third-party network calls (PayPal Sandbox,
+  LLM endpoint) were approved by the user for this hackathon entry,
+  with the reason recorded in the push commit message.
 
 ## What still needs a human
 
@@ -139,9 +138,10 @@ No secret is ever read from a file, printed, or committed.
 4. **Real-device demo video** (under 3 minutes, public YouTube) showing
    the flow working — the hackathon requires footage of the project
    functioning, and this sandbox cannot produce device footage.
-5. **Merge + Devpost submission**: human review, merge, then submit with
-   the repo link, the video, and an honest description (sandbox only,
-   heuristic fallback labelled as such).
+5. **Devpost submission**: submit with the repo link, the video, and an
+   honest description (sandbox only, heuristic fallback labelled as
+   such). Merge to main is done; submission is still pending the
+   sandbox run and the video.
 
 ## Tests
 
